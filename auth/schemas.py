@@ -42,3 +42,22 @@ class TokenResponse(BaseModel):
 
     # Required so FastAPI can serialize nested ORM objects without 422 errors.
     model_config = ConfigDict(from_attributes=True)
+
+
+# ── Forgot-password flow schemas ──────────────────────────────────────────────
+
+# Step 1 — POST /auth/forgot-password: user submits their email.
+class ForgotPasswordRequest(BaseModel):
+    email: EmailStr
+
+
+# Step 2 — POST /auth/verify-otp: user submits the 6-digit code they received.
+class VerifyOtpRequest(BaseModel):
+    email: EmailStr
+    otp: str = Field(..., min_length=6, max_length=6, pattern=r"^\d{6}$")
+
+
+# Step 3 — POST /auth/reset-password: user submits a new password after OTP verification.
+class ResetPasswordRequest(BaseModel):
+    email: EmailStr
+    new_password: str = Field(..., min_length=6)

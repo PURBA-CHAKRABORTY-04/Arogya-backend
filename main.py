@@ -38,3 +38,5 @@ def root():
         "message": "CognoCare AI Auth API is running",
         "endpoints": ["/auth/signup", "/auth/login", "/docs"],
     }
+
+# Trigger uvicorn reload with new environment variables.

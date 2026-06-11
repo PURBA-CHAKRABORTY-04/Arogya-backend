@@ -21,3 +21,6 @@ python-jose[cryptography]>=3.3.0
 
 # Email validation support in Pydantic (EmailStr)
 pydantic[email]>=2.7.0
+
+# Async HTTP client — used by email_utils to call the Vercel email microservice
+httpx>=0.27.0

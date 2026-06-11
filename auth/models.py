@@ -1,7 +1,7 @@
 import uuid
 
 # pyrefly: ignore [missing-import]
-from sqlalchemy import Column, DateTime, String, func
+from sqlalchemy import Boolean, Column, DateTime, String, func
 # pyrefly: ignore [missing-import]
 from sqlalchemy.dialects.postgresql import UUID
 
@@ -29,3 +29,10 @@ class User(Base):
     )
     reset_token_expiry = Column(DateTime(timezone=True), nullable=True)
     token_expiry = Column(DateTime(timezone=True), nullable=True)
+
+    # OTP fields for the forgot-password / email-verification flow.
+    # otp_code stores a 6-digit code; otp_expires_at marks when it lapses;
+    # otp_verified flips to True once the user enters the correct code.
+    otp_code = Column(String(6), nullable=True)
+    otp_expires_at = Column(DateTime(timezone=True), nullable=True)
+    otp_verified = Column(Boolean, nullable=False, default=False)
