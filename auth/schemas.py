@@ -39,3 +39,6 @@ class TokenResponse(BaseModel):
     access_token: str
     token_type: str = "bearer"
     user: UserResponse
+
+    # Required so FastAPI can serialize nested ORM objects without 422 errors.
+    model_config = ConfigDict(from_attributes=True)

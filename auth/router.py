@@ -1,3 +1,4 @@
+import traceback
 from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -38,21 +39,29 @@ def signup(payload: UserSignup, db: Session = Depends(get_db)):
     print("Creating new user:", user.email)
     db.add(user)
     try:
-        print("Committing to database...")  
+        print("Committing to database...")
         db.commit()
         print("Commit successful.")
     except IntegrityError as exc:
         db.rollback()
+        print("[IntegrityError]", traceback.format_exc())
         if getattr(exc.orig, "pgcode", None) != "23505":
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail="Could not create user",
             ) from None
-
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Email already registered",
         ) from None
+    except Exception as exc:
+        db.rollback()
+        print("[DB ERROR - full traceback]")
+        traceback.print_exc()
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Database error: {exc}",
+        ) from exc
 
     db.refresh(user)
     return user

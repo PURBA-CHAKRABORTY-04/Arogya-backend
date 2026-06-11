@@ -1,0 +1,23 @@
+# Web framework
+fastapi>=0.111.0
+
+# ASGI server to run FastAPI
+uvicorn[standard]>=0.29.0
+
+# Database ORM + PostgreSQL driver
+sqlalchemy>=2.0.0
+psycopg2-binary>=2.9.9
+
+# Load .env variables
+python-dotenv>=1.0.0
+
+# Password hashing
+# bcrypt 4.1+ dropped __about__ which breaks passlib — pin to last compatible version
+passlib[bcrypt]>=1.7.4
+bcrypt==4.0.1
+
+# JWT token creation and verification
+python-jose[cryptography]>=3.3.0
+
+# Email validation support in Pydantic (EmailStr)
+pydantic[email]>=2.7.0

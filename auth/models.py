@@ -1,6 +1,8 @@
 import uuid
 
+# pyrefly: ignore [missing-import]
 from sqlalchemy import Column, DateTime, String, func
+# pyrefly: ignore [missing-import]
 from sqlalchemy.dialects.postgresql import UUID
 
 from .database import Base
@@ -11,8 +13,8 @@ class User(Base):
     __tablename__ = "users"
 
     # User account fields stored in PostgreSQL.
-    id = Column(UUID(as_uuid=True), primary_key=False, default=uuid.uuid4)
-    email = Column(String(320), primary_key=True, index=True, nullable=False)
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    email = Column(String(320), unique=True, index=True, nullable=False)
     full_name = Column(String(255), nullable=False)
     hashed_password = Column(String(255), nullable=False)
     role = Column(String(20), nullable=False, default="patient")
