@@ -5,6 +5,7 @@ from auth.database import Base, engine
 from auth.models import User                         # noqa: F401
 from auth.router import router as auth_router
 from patient.models import PatientInfo               # noqa: F401 — ensures table is created
+from patient.timeline_models import TimelineEntry    # noqa: F401 — ensures timeline table is created
 from patient.router import router as patient_router
 
 

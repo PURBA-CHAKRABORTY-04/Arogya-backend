@@ -8,6 +8,8 @@ from auth.database import get_db
 from auth.models import User
 from patient.models import PatientInfo
 from patient.schemas import PatientInfoCreate, PatientInfoResponse, PatientInfoUpdate
+from patient.timeline_models import TimelineEntry
+from patient.timeline_schemas import TimelineEntryCreate, TimelineEntryResponse
 
 
 # All routes in this file start with /patient and appear under the Patient Info tag in /docs.
@@ -177,3 +179,80 @@ def delete_patient_info(email: str, db: Session = Depends(get_db)):
     db.delete(profile)
     db.commit()
     return {"message": f"Patient profile for {email} deleted successfully."}
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Health Timeline Entries
+# ══════════════════════════════════════════════════════════════════════════════
+
+@router.get(
+    "/timeline/{email}",
+    response_model=list[TimelineEntryResponse],
+    summary="Fetch all health timeline entries for a patient",
+)
+def get_timeline(email: str, db: Session = Depends(get_db)):
+    """
+    Returns all timeline entries for the given patient email,
+    ordered newest-first.
+
+    - Returns **403** if the account is not a patient role.
+    - Returns **404** if the user does not exist.
+    """
+    email = unquote(email)
+    _require_patient_role(email, db)
+
+    entries = (
+        db.query(TimelineEntry)
+        .filter(TimelineEntry.patient_email == email)
+        .order_by(TimelineEntry.created_at.desc())
+        .all()
+    )
+    return entries
+
+
+@router.post(
+    "/timeline",
+    response_model=TimelineEntryResponse,
+    status_code=status.HTTP_201_CREATED,
+    summary="Add a new health timeline entry",
+)
+def create_timeline_entry(
+    payload: TimelineEntryCreate,
+    db: Session = Depends(get_db),
+):
+    """
+    Creates a new timeline entry (symptom log, document upload record,
+    voice triage summary, etc.) for the given patient.
+
+    - Returns **403** if the account is not a patient role.
+    - Returns **404** if the user does not exist.
+    """
+    _require_patient_role(payload.patient_email, db)
+
+    entry = TimelineEntry(**payload.model_dump())
+    db.add(entry)
+    db.commit()
+    db.refresh(entry)
+    return entry
+
+
+@router.delete(
+    "/timeline/{entry_id}",
+    status_code=status.HTTP_200_OK,
+    summary="Delete a single health timeline entry",
+)
+def delete_timeline_entry(entry_id: str, db: Session = Depends(get_db)):
+    """
+    Permanently removes the timeline entry with the given UUID.
+
+    - Returns **404** if the entry does not exist.
+    """
+    entry = db.query(TimelineEntry).filter(TimelineEntry.id == entry_id).first()
+    if not entry:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Timeline entry not found.",
+        )
+    db.delete(entry)
+    db.commit()
+    return {"message": "Timeline entry deleted."}
