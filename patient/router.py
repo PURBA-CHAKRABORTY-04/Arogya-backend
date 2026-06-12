@@ -14,6 +14,27 @@ from patient.schemas import PatientInfoCreate, PatientInfoResponse, PatientInfoU
 router = APIRouter(prefix="/patient", tags=["Patient Info"])
 
 
+# ── RBAC helper ───────────────────────────────────────────────────────────────
+
+def _require_patient_role(email: str, db: Session) -> User:
+    """
+    Fetch the user by email and raise 403 if their account role is not 'patient'.
+    Also raises 404 if the email is not registered at all.
+    """
+    user = db.query(User).filter(User.email == email).first()
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="No registered user found with this email.",
+        )
+    if user.role != "patient":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only patient accounts can have a patient profile.",
+        )
+    return user
+
+
 # ── Create ────────────────────────────────────────────────────────────────────
 
 @router.post(
@@ -24,18 +45,14 @@ router = APIRouter(prefix="/patient", tags=["Patient Info"])
 )
 def create_patient_info(payload: PatientInfoCreate, db: Session = Depends(get_db)):
     """
-    Create a new PatientInfo record for an existing user.
+    Create a new PatientInfo record for an existing **patient** user.
 
     - Returns **404** if the email is not found in the users table.
+    - Returns **403** if the account role is not ``patient``.
     - Returns **409** if a profile already exists for this email.
     """
-    # Guard: the email must belong to a registered user.
-    user = db.query(User).filter(User.email == payload.email).first()
-    if not user:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="No registered user found with this email.",
-        )
+    # Guard: email must exist and belong to a patient account.
+    _require_patient_role(payload.email, db)
 
     # Guard: each user may only have one patient profile.
     existing = db.query(PatientInfo).filter(PatientInfo.email == payload.email).first()
@@ -68,8 +85,13 @@ def get_patient_info(email: str, db: Session = Depends(get_db)):
     (e.g. ``user%40example.com``). The server decodes them automatically.
 
     - Returns **404** if no profile exists for this email.
+    - Returns **403** if the account role is not ``patient``.
     """
     email = unquote(email)
+
+    # Guard: only patient-role accounts have profiles.
+    _require_patient_role(email, db)
+
     profile = db.query(PatientInfo).filter(PatientInfo.email == email).first()
     if not profile:
         raise HTTPException(
@@ -94,14 +116,19 @@ def update_patient_info(
     """
     Partially update the PatientInfo record for the given email.
 
-    Immutable fields (``dob``, ``blood_group``, ``email``) cannot be changed
-    via this endpoint — they are excluded from the request schema entirely.
+    Immutable fields (``dob``, ``blood_group``, ``email``, ``name``, ``gender``)
+    cannot be changed via this endpoint — they are excluded from the request schema.
 
     **Note:** Email addresses must be percent-encoded in the URL path.
 
     - Returns **404** if no profile exists for this email.
+    - Returns **403** if the account role is not ``patient``.
     """
     email = unquote(email)
+
+    # Guard: only patient-role accounts own profiles.
+    _require_patient_role(email, db)
+
     profile = db.query(PatientInfo).filter(PatientInfo.email == email).first()
     if not profile:
         raise HTTPException(
@@ -133,8 +160,13 @@ def delete_patient_info(email: str, db: Session = Depends(get_db)):
     **Note:** Email addresses must be percent-encoded in the URL path.
 
     - Returns **404** if no profile exists for this email.
+    - Returns **403** if the account role is not ``patient``.
     """
     email = unquote(email)
+
+    # Guard: only patient-role accounts own profiles.
+    _require_patient_role(email, db)
+
     profile = db.query(PatientInfo).filter(PatientInfo.email == email).first()
     if not profile:
         raise HTTPException(

@@ -36,12 +36,10 @@ class PatientInfoCreate(BaseModel):
 
 # ── UPDATE ────────────────────────────────────────────────────────────────────
 # Used by PUT /patient/patient-info/{email}.
-# dob, blood_group, and email are intentionally EXCLUDED — they are immutable.
+# dob, blood_group, email, name, and gender are intentionally EXCLUDED — they are immutable.
 
 class PatientInfoUpdate(BaseModel):
-    name:           Optional[str]   = Field(None, min_length=1, max_length=255)
     contact_number: Optional[str]   = Field(None, max_length=20)
-    gender:         Optional[str]   = None
     city:           Optional[str]   = Field(None, min_length=1, max_length=100)
 
     height_cm: Optional[float] = Field(None, gt=0)
