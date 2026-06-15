@@ -7,6 +7,7 @@ from auth.router import router as auth_router
 from patient.models import PatientInfo               # noqa: F401 — ensures table is created
 from patient.timeline_models import TimelineEntry    # noqa: F401 — ensures timeline table is created
 from patient.router import router as patient_router
+from symptom_triage.router import router as symptom_triage_router
 
 
 # Create the FastAPI application object that Uvicorn runs.
@@ -35,6 +36,9 @@ app.include_router(auth_router)
 
 # Register all /patient routes for patient profile CRUD.
 app.include_router(patient_router)
+
+# Register /symptom_triage routes for Gemini LLM Triage
+app.include_router(symptom_triage_router)
 
 
 # Simple health/root endpoint to confirm the API is running.
