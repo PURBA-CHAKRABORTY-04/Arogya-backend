@@ -4,13 +4,16 @@ from fastapi.middleware.cors import CORSMiddleware
 from auth.database import Base, engine
 from auth.models import User                         # noqa: F401
 from auth.router import router as auth_router
-from patient.models import PatientInfo               # noqa: F401 — ensures table is created
-from patient.timeline_models import TimelineEntry    # noqa: F401 — ensures timeline table is created
+from dashboard.patient.models import PatientInfo               # noqa: F401 — ensures table is created
+from dashboard.patient.timeline_models import TimelineEntry    # noqa: F401 — ensures timeline table is created
 from symptom_triage.models import TriageSession      # noqa: F401 — ensures triage session table is created
-from patient.router import router as patient_router
+from dashboard.patient.router import router as patient_router
 from symptom_triage.router import router as symptom_triage_router
 from complaints.models import Complaint                # noqa: F401 — ensures complaint table is created
 from complaints.router import router as complaints_router
+from dashboard.upload.router import router as upload_router
+from dashboard.biometric.models import BiometricMetric          # noqa: F401 — ensures biometric table is created
+from dashboard.biometric.router import router as biometric_router
 
 
 # Create the FastAPI application object that Uvicorn runs.
@@ -45,6 +48,12 @@ app.include_router(symptom_triage_router)
 
 # Register /complaints routes for Patient Complaints
 app.include_router(complaints_router, prefix="/complaints")
+
+# Register /upload routes for Cloudinary file uploads (PDF / JPG / PNG)
+app.include_router(upload_router)
+
+# Register /biometric routes for patient biometric metric CRUD
+app.include_router(biometric_router)
 
 # Simple health/root endpoint to confirm the API is running.
 @app.get("/")

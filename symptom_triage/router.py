@@ -9,8 +9,8 @@ from sqlalchemy.orm import Session
 from openai import OpenAI
 
 from auth.database import get_db
-from patient.models import PatientInfo
-from patient.timeline_models import TimelineEntry
+from dashboard.patient.models import PatientInfo
+from dashboard.patient.timeline_models import TimelineEntry
 from .schemas import SymptomTriageRequest, TriageResponse, TriageSessionResponse, ChatMessage
 from .models import TriageSession
 

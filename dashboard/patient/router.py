@@ -6,10 +6,10 @@ from sqlalchemy.orm import Session
 
 from auth.database import get_db
 from auth.models import User
-from patient.models import PatientInfo
-from patient.schemas import PatientInfoCreate, PatientInfoResponse, PatientInfoUpdate
-from patient.timeline_models import TimelineEntry
-from patient.timeline_schemas import TimelineEntryCreate, TimelineEntryResponse
+from dashboard.patient.models import PatientInfo
+from dashboard.patient.schemas import PatientInfoCreate, PatientInfoResponse, PatientInfoUpdate
+from dashboard.patient.timeline_models import TimelineEntry
+from dashboard.patient.timeline_schemas import TimelineEntryCreate, TimelineEntryResponse
 
 
 # All routes in this file start with /patient and appear under the Patient Info tag in /docs.
