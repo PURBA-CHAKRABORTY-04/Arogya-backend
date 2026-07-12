@@ -15,6 +15,7 @@ class User(Base):
     # User account fields stored in PostgreSQL.
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     email = Column(String(320), unique=True, index=True, nullable=False)
+    phone_number = Column(String(20), unique=True, index=True, nullable=True)
     full_name = Column(String(255), nullable=False)
     hashed_password = Column(String(255), nullable=False)
     role = Column(String(20), nullable=False, default="patient")

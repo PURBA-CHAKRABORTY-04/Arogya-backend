@@ -2,7 +2,7 @@ from typing import Literal
 from uuid import UUID
 
 # pyrefly: ignore [missing-import]
-from pydantic import BaseModel, ConfigDict, EmailStr, Field
+from pydantic import BaseModel, ConfigDict, EmailStr, Field, model_validator
 
 
 # Restrict account roles to the two roles supported by the app UI.
@@ -13,15 +13,24 @@ UserRole = Literal["patient", "doctor"]
 class UserSignup(BaseModel):
     email: EmailStr
     full_name: str = Field(..., min_length=1, max_length=255)
+    phone_number: str = Field(..., min_length=7, max_length=20, pattern=r"^\+?[\d\s\-\(\)]{7,20}$")
     password: str = Field(..., min_length=6)
     role: UserRole = "patient"
 
 
 # Request body expected by POST /auth/login.
+# Accepts EITHER email OR phone_number (at least one must be provided).
 class UserLogin(BaseModel):
-    email: EmailStr
+    email: EmailStr | None = None
+    phone_number: str | None = None
     password: str
     role: UserRole | None = None
+
+    @model_validator(mode="after")
+    def require_email_or_phone(self):
+        if not self.email and not self.phone_number:
+            raise ValueError("Either 'email' or 'phone_number' must be provided.")
+        return self
 
 
 # Public user data returned to the frontend without the password hash.
@@ -30,6 +39,7 @@ class UserResponse(BaseModel):
     email: EmailStr
     full_name: str
     role: str
+    phone_number: str | None = None
 
     # Allows Pydantic to read values directly from SQLAlchemy User objects.
     model_config = ConfigDict(from_attributes=True)
@@ -62,3 +72,4 @@ class VerifyOtpRequest(BaseModel):
 class ResetPasswordRequest(BaseModel):
     email: EmailStr
     new_password: str = Field(..., min_length=6)
+

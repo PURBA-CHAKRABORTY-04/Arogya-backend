@@ -41,10 +41,20 @@ def signup(payload: UserSignup, db: Session = Depends(get_db)):
             detail="Email already registered",
         )
 
+    # Reject duplicate phone numbers.
+    if payload.phone_number:
+        existing_phone = db.query(User).filter(User.phone_number == payload.phone_number).first()
+        if existing_phone:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Phone number already registered",
+            )
+
     # Build the ORM object that will become a row in the users table.
     user = User(
         email=payload.email,
         full_name=payload.full_name.strip(),
+        phone_number=payload.phone_number,
         hashed_password=hash_password(payload.password),
         role=payload.role,
     )
@@ -86,12 +96,18 @@ def signup(payload: UserSignup, db: Session = Depends(get_db)):
 # Verify user credentials and return a JWT token plus user profile.
 @router.post("/login", response_model=TokenResponse)
 def login(payload: UserLogin, db: Session = Depends(get_db)):
-    # Find the account by email and compare the submitted password to the hash.
-    user = db.query(User).filter(User.email == payload.email).first()
+    # Find the account by email or phone number depending on which was submitted.
+    if payload.email:
+        user = db.query(User).filter(User.email == payload.email).first()
+        invalid_msg = "Incorrect email or password"
+    else:
+        user = db.query(User).filter(User.phone_number == payload.phone_number).first()
+        invalid_msg = "Incorrect phone number or password"
+
     if not user or not verify_password(payload.password, user.hashed_password):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Incorrect email or password",
+            detail=invalid_msg,
         )
 
     # Prevent a patient account from logging in through the doctor tab, and vice versa.
