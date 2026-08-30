@@ -16,6 +16,8 @@ from dashboard.biometric.models import BiometricMetric          # noqa: F401 —
 from dashboard.biometric.router import router as biometric_router
 from dashboard.schedule.models import ScheduleEvent              # noqa: F401 — ensures schedule_events table is created
 from dashboard.schedule.router import router as schedule_router
+from doctor_matching.models import DoctorProfile              # noqa: F401 — ensures doctor_profiles table is created
+from doctor_matching.router import router as doctor_matching_router
 
 
 # Create the FastAPI application object that Uvicorn runs.
@@ -60,6 +62,9 @@ app.include_router(biometric_router)
 # Register /schedule routes for patient schedule events CRUD
 app.include_router(schedule_router)
 
+# Register /doctor-matching routes for patient matching
+app.include_router(doctor_matching_router)
+
 # Simple health/root endpoint to confirm the API is running.
 @app.get("/")
 def root():
@@ -74,3 +79,4 @@ def root():
     }
 
 # Trigger uvicorn reload with new environment variables.
+# Reload triggered after installing openai and other packages.
