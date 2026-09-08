@@ -1,124 +1,68 @@
 import os
 import json
-import threading
-import re
-from typing import List, Optional
+import uuid
+from typing import List, Optional, Dict, Any
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 
-from auth.database import Base, get_db
+from auth.database import get_db
 from symptom_triage.models import TriageSession
-from .models import DoctorProfile
-from .schemas import DoctorMatchRequest, DoctorMatchResponse, DoctorMatchResponseItem, DoctorResponse
+from .models import DoctorProfile, DoctorRankingInteraction
+from .schemas import (
+    DoctorMatchRequest,
+    DoctorMatchResponse,
+    DoctorMatchResponseItem,
+    DoctorResponse,
+    LocationPayload,
+    LocationResponse,
+    ScoreBreakdownSchema,
+    InteractionLogRequest,
+    InteractionLogResponse,
+)
+from .config import DEFAULT_CONFIG, MatchingEngineConfig
+from .distance_service import distance_service
+from .scoring_engine import (
+    compute_doctor_score,
+    compute_symptom_specialty_scores,
+    calculate_pool_fee_scores,
+)
 
 router = APIRouter(prefix="/doctor-matching", tags=["Doctor Matching"])
 
-# Prompt designed for structured JSON matching
-MATCHING_SYSTEM_PROMPT = """You are a medical AI matching engine.
-Given a patient's symptoms, an optional recommended specialty from a triage assessment, and a list of candidate doctors (with their specialties and clinical descriptions), calculate an accurate, nuanced match score (0 to 100) and a clinical matching justification for each doctor.
+# In-memory storage for search session location state
+SESSION_LOCATIONS: Dict[str, Dict[str, Any]] = {}
 
-Rules:
-- If a recommended_specialty is provided, doctors whose specialty closely matches it should receive a high score (82-98).
-- High match score (82-99): Doctor's specialty is directly relevant to the patient's primary symptoms or recommended specialty.
-- Moderate match score (50-81): Doctor has general specialty relevance or functional/integrative medicine overlap.
-- Low match score (0-49): Doctor's specialty is unrelated to the symptoms and recommended specialty.
-- Granularity & Realism: Do NOT default to generic round numbers (e.g., exactly 85, 90, 95, 100) unless specifically warranted. Differentiate candidates based on years of experience, relevant sub-specialties, and clinical keyword alignment described in their profiles. Two doctors in the same broad specialty should rarely receive identical scores if one has more specific relevant experience.
-- The response must be a valid JSON object matching this schema:
-{
-  "matches": [
-    {
-      "doctor_id": "string (UUID representing doctor ID)",
-      "match_score": 93,
-      "match_reason": "Clinical justification here"
+
+@router.post("/location", response_model=LocationResponse)
+def set_session_location(payload: LocationPayload):
+    """
+    Mandatory unskippable location query endpoint.
+    Stores user's location (browser geolocation lat/long or pincode/address entry)
+    in session state, reusable for subsequent searches without re-asking.
+    """
+    session_id = payload.session_id or str(uuid.uuid4())
+    SESSION_LOCATIONS[session_id] = {
+        "lat": payload.lat,
+        "lng": payload.lng,
+        "pincode": payload.pincode,
+        "address": payload.address,
     }
-  ]
-}
-"""
+    return LocationResponse(
+        session_id=session_id,
+        status="Location updated in session state",
+        saved_location=SESSION_LOCATIONS[session_id],
+    )
 
 
-def _run_llm_matching(symptoms: str, doctors_list: list[dict], recommended_specialty: str = None) -> dict:
-    """Uses GPT-4o-mini to calculate semantic match scores and justifications for candidate doctors."""
-    api_key = os.getenv("OPENAI_API_KEY")
-    if not api_key:
-        return {}
-
-    try:
-        from openai import OpenAI
-        client = OpenAI(api_key=api_key)
-
-        prompt_input = {
-            "patient_symptoms": symptoms or "General consultation request",
-            "available_doctors": [
-                {
-                    "id": str(doc["id"]),
-                    "name": doc["name"],
-                    "specialty": doc["role"],
-                    "description": doc["description"]
-                }
-                for doc in doctors_list
-            ]
-        }
-
-        if recommended_specialty:
-            prompt_input["recommended_specialty"] = recommended_specialty
-
-        response = client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[
-                {"role": "system", "content": MATCHING_SYSTEM_PROMPT},
-                {"role": "user", "content": f"Match task data:\n\n{json.dumps(prompt_input)}"},
-            ],
-            response_format={"type": "json_object"},
-            temperature=0.3,
-            max_tokens=2500,
-            timeout=10.0,
+@router.get("/location/{session_id}")
+def get_session_location(session_id: str):
+    """Retrieves stored location for a search session."""
+    if session_id not in SESSION_LOCATIONS:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="No saved location found for this session ID.",
         )
-
-        raw = response.choices[0].message.content.strip()
-        return json.loads(raw)
-    except Exception as exc:
-        print(f"[MATCH ENGINE ERROR] {type(exc).__name__}: {exc}")
-        return {}
-
-
-def _get_specialty_keywords(specialty: str) -> list[str]:
-    """Generates fuzzy root keywords for clinical specialty matching."""
-    if not specialty:
-        return []
-    
-    spec_clean = specialty.lower().strip()
-    keywords = [spec_clean]
-    
-    # Common medical stem and alias mappings
-    stem_map = {
-        "cardio": ["cardio", "heart", "coronary", "vascular", "cardiac"],
-        "neuro": ["neuro", "brain", "spine", "stroke", "nervous"],
-        "ortho": ["ortho", "bone", "joint", "musculoskeletal", "spine"],
-        "pulmon": ["pulmon", "respiratory", "chest", "lung", "asthma"],
-        "gastro": ["gastro", "digest", "liver", "endoscopy", "gi "],
-        "derm": ["derm", "skin", "cosmet"],
-        "ent": ["ent", "ear", "nose", "throat", "head & neck", "otolaryng"],
-        "ophthal": ["ophthal", "eye", "vision", "retina"],
-        "paediatr": ["paediatr", "pediatr", "child"],
-        "pediatr": ["paediatr", "pediatr", "child"],
-        "psych": ["psych", "mental", "behavioral"],
-        "endocrin": ["endocrin", "diabet", "thyroid", "metabolic"],
-        "nephro": ["nephro", "kidney", "renal", "dialysis"],
-        "urol": ["urol", "urinary", "bladder", "prostate"],
-        "oncol": ["oncol", "cancer", "tumor"],
-        "general": ["general", "internal medicine", "physician", "family"],
-        "gynec": ["gynec", "gynaec", "obstetric", "women"],
-        "gynaec": ["gynec", "gynaec", "obstetric", "women"],
-    }
-    
-    for stem, aliases in stem_map.items():
-        if stem in spec_clean:
-            keywords.extend(aliases)
-            
-    # Add individual words
-    words = re.findall(r'[a-zA-Z]{3,}', spec_clean)
-    keywords.extend(words)
-    return list(set(keywords))
+    return {"session_id": session_id, "location": SESSION_LOCATIONS[session_id]}
 
 
 def get_matched_doctors(
@@ -126,151 +70,155 @@ def get_matched_doctors(
     symptoms: str = "",
     recommended_specialty: Optional[str] = None,
     location: str = "All",
+    patient_origin: Optional[Dict[str, Any]] = None,
+    session_id: Optional[str] = None,
     max_price: Optional[float] = None,
+    insurance_filter: Optional[str] = None,
+    max_distance_km: Optional[float] = None,
+    availability_only: bool = False,
     limit: int = 50,
+    config: Optional[MatchingEngineConfig] = None,
 ) -> List[DoctorMatchResponseItem]:
     """
-    Core doctor matching engine.
-    Ranks doctors and matches them against symptoms and recommended specialties.
+    Core doctor matching engine with:
+    1. Pre-scoring Hard Filters (Insurance, Availability, Price)
+    2. Batched Distance Matrix Resolution & Session Caching
+    3. Multi-Factor Weighted Scoring Engine
+    4. Post-Distance Radius Filter
     """
+    cfg = config or DEFAULT_CONFIG
     query = db.query(DoctorProfile)
 
-    # 1. Apply hard filtering (Location and Price)
-    if location and location.lower() != "all":
-        query = query.filter(DoctorProfile.city.ilike(f"%{location.strip()}%"))
+    # --- HARD FILTERS (APPLIED BEFORE SCORING) ---
+    # Filter 1: Availability
+    if availability_only:
+        query = query.filter(DoctorProfile.is_available.is_(True))
 
+    # Filter 2: Max Consultation Fee
     if max_price is not None:
         query = query.filter(DoctorProfile.consultation_fee <= max_price)
 
-    doctors = query.all()
-    if not doctors:
-        # If city filter had 0 results, fall back to all doctors
-        doctors = db.query(DoctorProfile).all()
-        if not doctors:
+    # Filter 3: City / Area match (if provided)
+    if location and location.lower() != "all":
+        query = query.filter(DoctorProfile.city.ilike(f"%{location.strip()}%"))
+
+    # Filter 4: Insurance Accepted
+    if insurance_filter and insurance_filter.strip():
+        query = query.filter(
+            DoctorProfile.insurance_accepted.ilike(f"%{insurance_filter.strip()}%")
+        )
+
+    candidates = query.all()
+    if not candidates:
+        # Fall back to all doctors if city filter produced 0 results
+        candidates = db.query(DoctorProfile).all()
+        if not candidates:
             return []
 
-    # 2. Continuous Heuristic Matching
-    scored_doctors = []
-    spec_keywords = _get_specialty_keywords(recommended_specialty) if recommended_specialty else []
-    symptoms_lower = (symptoms or "").lower()
-
-    # Symptom-to-specialty mapping clusters for heuristic scoring
-    symptom_specialty_map = [
-        (["chest", "heart", "breath", "palpitation", "bp", "cardiac"], ["cardio", "heart", "vascular"], "Cardiology"),
-        (["headache", "migraine", "dizziness", "numbness", "seizure", "neural", "nerve"], ["neuro", "brain", "neural", "spine"], "Neurology"),
-        (["cough", "breath", "wheez", "asthma", "lung", "phlegm", "respiratory"], ["pulmon", "respiratory", "chest"], "Pulmonology"),
-        (["stomach", "nausea", "vomit", "diarrhea", "acidity", "abdomen", "gastric"], ["gastro", "digest", "liver", "gi "], "Gastroenterology"),
-        (["joint", "back", "knee", "hip", "bone", "fracture", "spine", "arthritis"], ["ortho", "bone", "joint", "spine"], "Orthopedics"),
-        (["skin", "rash", "itch", "allergy", "acne", "eczema", "dermatitis"], ["derm", "skin", "allergy"], "Dermatology"),
-        (["ear", "nose", "throat", "sinus", "tonsil", "hearing", "vocal"], ["ent", "ear", "throat", "otolaryng"], "ENT"),
-        (["urinary", "bladder", "prostate", "kidney", "renal"], ["urol", "nephro", "kidney"], "Urology/Nephrology"),
-        (["women", "pregnancy", "period", "pelvic", "maternity"], ["gynec", "gynaec", "obstetric"], "Gynecology"),
-        (["child", "infant", "pediatric", "toddler"], ["paediatr", "pediatr", "child"], "Pediatrics")
-    ]
-
-    for doc in doctors:
-        role_lower = (doc.role or "").lower()
-        desc_lower = (doc.description or "").lower()
-
-        # Base baseline score
-        base_score = 62.0
-        match_reason = f"Experienced {doc.role} available in {doc.city or 'your area'}."
-
-        # Specialty keyword density
-        specialty_points = 0
-        if spec_keywords:
-            role_matches = sum(1 for kw in spec_keywords if len(kw) > 2 and kw in role_lower)
-            desc_matches = sum(1 for kw in spec_keywords if len(kw) > 3 and kw in desc_lower)
-            
-            if role_matches > 0:
-                specialty_points = 24.0 + min(role_matches * 3.0 + desc_matches * 1.5, 10.0)
-                match_reason = f"Primary specialty ({doc.role}) directly aligns with recommended {recommended_specialty} assessment."
-            elif desc_matches > 0:
-                specialty_points = 14.0 + min(desc_matches * 2.5, 8.0)
-                match_reason = f"Clinical background includes expertise relevant to {recommended_specialty}."
-
-        # Symptom keyword overlap
-        symptom_points = 0
-        if symptoms_lower:
-            for sym_keywords, doc_keywords, spec_name in symptom_specialty_map:
-                sym_match_count = sum(1 for sk in sym_keywords if sk in symptoms_lower)
-                if sym_match_count > 0:
-                    doc_has_role = any(dk in role_lower for dk in doc_keywords)
-                    doc_has_desc = any(dk in desc_lower for dk in doc_keywords)
-                    if doc_has_role:
-                        pts = 25.0 + min(sym_match_count * 2.0, 7.0)
-                        if pts > symptom_points:
-                            symptom_points = pts
-                            match_reason = f"{spec_name} specialist directly matches reported symptoms."
-                    elif doc_has_desc:
-                        pts = 15.0 + min(sym_match_count * 1.5, 5.0)
-                        if pts > symptom_points:
-                            symptom_points = pts
-                            match_reason = f"Clinical experience includes relevant treatment for reported symptoms."
-
-        # Experience & rating micro-bonus for non-bucketed organic variation (0 - 4 points)
-        exp_years = getattr(doc, "experience_years", 0) or 0
-        exp_bonus = min(exp_years * 0.15, 2.5) if exp_years else 0.0
-        rating = getattr(doc, "rating", 0) or 0
-        rating_bonus = min(max(rating - 4.0, 0.0) * 1.5, 1.5) if rating else 0.0
-
-        raw_score = base_score + max(specialty_points, symptom_points) + (min(specialty_points, symptom_points) * 0.2) + exp_bonus + rating_bonus
-        final_heuristic_score = int(round(min(max(raw_score, 45.0), 98.0)))
-
-        scored_doctors.append({
-            "doc": doc,
-            "heuristic_score": final_heuristic_score,
-            "heuristic_reason": match_reason
-        })
-
-    # Sort candidates by heuristic score
-    scored_doctors.sort(key=lambda x: x["heuristic_score"], reverse=True)
-
-    # 3. Refine top candidates with GPT-4o-mini directly (no leaky threads/race condition)
-    llm_candidates = [
+    # Prepare candidate dicts for batched distance resolution
+    doc_dicts = [
         {
-            "id": item["doc"].id,
-            "name": item["doc"].name,
-            "role": item["doc"].role,
-            "description": item["doc"].description or ""
+            "id": str(doc.id),
+            "address": doc.address or doc.city,
+            "latitude": doc.latitude,
+            "longitude": doc.longitude,
+            "city": doc.city,
         }
-        for item in scored_doctors[:20]
+        for doc in candidates
     ]
 
-    llm_matches = {}
-    if (symptoms.strip() or recommended_specialty) and os.getenv("OPENAI_API_KEY"):
-        llm_output = _run_llm_matching(symptoms, llm_candidates, recommended_specialty)
-        if llm_output and "matches" in llm_output:
-            for item in llm_output["matches"]:
-                doc_id = item.get("doctor_id")
-                if doc_id:
-                    llm_matches[str(doc_id)] = {
-                        "score": item.get("match_score", 50),
-                        "reason": item.get("match_reason", "Recommended based on clinical profile.")
-                    }
+    # Resolve patient origin location (from payload or session state)
+    effective_session_id = session_id or "default_session"
+    origin_location = patient_origin or SESSION_LOCATIONS.get(effective_session_id, {})
 
-    # 4. Construct final items
-    results = []
-    for item in scored_doctors:
-        doc = item["doc"]
-        doc_str_id = str(doc.id)
+    # Batched Distance Matrix Calculation (cached per session)
+    distances = distance_service.compute_batch_distances(
+        session_id=effective_session_id,
+        patient_origin=origin_location,
+        doctors=doc_dicts,
+    )
 
-        if doc_str_id in llm_matches:
-            score = llm_matches[doc_str_id]["score"]
-            reason = llm_matches[doc_str_id]["reason"]
+    # Calculate pool-relative fee scores for tiebreaking
+    candidate_fees = [doc.consultation_fee or 0.0 for doc in candidates]
+    fee_scores = calculate_pool_fee_scores(candidate_fees)
+
+    results: List[DoctorMatchResponseItem] = []
+
+    for idx, doc in enumerate(candidates):
+        doc_id_str = str(doc.id)
+        dist_km = distances.get(doc_id_str, 8.0)
+
+        # Filter 5: Max Acceptable Distance Radius Filter (Post-distance calculation)
+        if max_distance_km is not None and dist_km > max_distance_km:
+            continue
+
+        # Calculate S_spec and S_symp match scores
+        s_spec, s_symp = compute_symptom_specialty_scores(
+            symptoms=symptoms,
+            recommended_specialty=recommended_specialty,
+            doctor_role=doc.role,
+            doctor_description=doc.description,
+        )
+
+        fee_score = fee_scores[idx] if idx < len(fee_scores) else 50.0
+
+        # Calculate master multi-factor raw score and score breakdown
+        breakdown = compute_doctor_score(
+            s_spec=s_spec,
+            s_symp=s_symp,
+            qualification_str=doc.qualification,
+            experience_years=doc.experience_years,
+            distance_km=dist_km,
+            fee_score=fee_score,
+            config=cfg,
+        )
+
+        # Build clinical match reason justification string
+        reasons = []
+        if breakdown.s_spec > 20:
+            reasons.append(f"Specialist in {doc.role}")
+        elif breakdown.s_symp > 20:
+            reasons.append(f"Expertise in treating your symptoms")
         else:
-            score = item["heuristic_score"]
-            reason = item["heuristic_reason"]
+            reasons.append(f"Experienced {doc.role}")
+
+        if dist_km <= 5.0:
+            reasons.append(f"Nearby clinic ({dist_km:.1f} km)")
+        elif dist_km:
+            reasons.append(f"{dist_km:.1f} km away")
+
+        if doc.experience_years:
+            reasons.append(f"{int(doc.experience_years)} yrs exp")
+
+        match_reason = " • ".join(reasons)
 
         doc_schema = DoctorResponse.model_validate(doc)
+        breakdown_schema = ScoreBreakdownSchema(
+            raw_score=breakdown.raw_score,
+            final_score=breakdown.final_score,
+            base_score=breakdown.base_score,
+            d_score=breakdown.d_score,
+            distance_km=breakdown.distance_km,
+            distance_score=breakdown.distance_score,
+            distance_weighted=breakdown.distance_weighted,
+            e_bonus=breakdown.e_bonus,
+            fee_score=breakdown.fee_score,
+            fee_weighted=breakdown.fee_weighted,
+            s_spec=breakdown.s_spec,
+            s_symp=breakdown.s_symp,
+            s_combined=breakdown.s_combined,
+        )
+
         results.append(
             DoctorMatchResponseItem(
                 doctor=doc_schema,
-                match_score=score,
-                match_reason=reason
+                match_score=breakdown.final_score,
+                match_reason=match_reason,
+                score_breakdown=breakdown_schema,
             )
         )
 
+    # Rank doctors by match score (highest to lowest)
     results.sort(key=lambda x: x.match_score, reverse=True)
     return results[:limit]
 
@@ -278,14 +226,28 @@ def get_matched_doctors(
 @router.post("/match", response_model=DoctorMatchResponse)
 def match_doctors(payload: DoctorMatchRequest, db: Session = Depends(get_db)):
     """
-    Ranks and matches available doctors against patient symptoms, location (city), and consultation fees.
-    Works dynamically with datasets of any size (4,000+ doctors).
+    Ranks and matches available doctors against patient symptoms, location, and pre-scoring hard filters.
+    Executes batched Distance Matrix API calls and multi-factor weighted scoring.
     """
     symptoms = payload.symptoms or ""
     patient_email = payload.patient_email
     location = payload.location or "All"
     max_price = payload.max_price
     recommended_specialty = payload.recommended_specialty
+    session_id = payload.session_id or str(uuid.uuid4())
+
+    # Resolve patient location
+    patient_origin = None
+    if payload.patient_location:
+        patient_origin = {
+            "lat": payload.patient_location.lat,
+            "lng": payload.patient_location.lng,
+            "pincode": payload.patient_location.pincode,
+            "address": payload.patient_location.address,
+        }
+        SESSION_LOCATIONS[session_id] = patient_origin
+    elif session_id in SESSION_LOCATIONS:
+        patient_origin = SESSION_LOCATIONS[session_id]
 
     # Auto-fetch symptoms and specialty from latest triage session if blank
     if patient_email and (not symptoms.strip() or not recommended_specialty):
@@ -313,8 +275,50 @@ def match_doctors(payload: DoctorMatchRequest, db: Session = Depends(get_db)):
         symptoms=symptoms,
         recommended_specialty=recommended_specialty,
         location=location,
+        patient_origin=patient_origin,
+        session_id=session_id,
         max_price=max_price,
-        limit=50
+        insurance_filter=payload.insurance_filter,
+        max_distance_km=payload.max_distance_km,
+        availability_only=payload.availability_only or False,
+        limit=50,
     )
 
-    return DoctorMatchResponse(matches=matches)
+    return DoctorMatchResponse(
+        matches=matches, session_id=session_id, candidate_pool_count=len(matches)
+    )
+
+
+@router.post("/interaction", response_model=InteractionLogResponse)
+def log_doctor_interaction(payload: InteractionLogRequest, db: Session = Depends(get_db)):
+    """
+    Logs user interactions (impressions, clicks, bookings) from doctor search results
+    into PostgreSQL table doctor_ranking_interactions.
+    Used for offline calibration of scoring engine weights against real user behavior.
+    """
+    try:
+        interaction = DoctorRankingInteraction(
+            session_id=payload.session_id,
+            patient_email=payload.patient_email,
+            search_query=payload.search_query,
+            doctor_id=payload.doctor_id,
+            rank_position=payload.rank_position,
+            raw_score=payload.raw_score,
+            final_score=payload.final_score,
+            score_breakdown=json.dumps(payload.score_breakdown) if payload.score_breakdown else None,
+            interaction_type=payload.interaction_type,
+        )
+        db.add(interaction)
+        db.commit()
+        db.refresh(interaction)
+
+        return InteractionLogResponse(
+            status=f"Recorded {payload.interaction_type} interaction",
+            interaction_id=interaction.id,
+        )
+    except Exception as exc:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to record interaction: {str(exc)}",
+        )
