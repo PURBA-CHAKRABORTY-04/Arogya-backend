@@ -1,18 +1,20 @@
 # -*- coding: utf-8 -*-
 import sys
 import io
+import os
 sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
 import cloudinary
 import cloudinary.uploader
 import cloudinary.api
 
 # ─────────────────────────────────────────────
-# STEP 1: Configure Cloudinary (inline credentials)
+# STEP 1: Configure Cloudinary (from environment variables)
+# Set CLOUDINARY_CLOUD_NAME, CLOUDINARY_API_KEY, CLOUDINARY_API_SECRET in your .env
 # ─────────────────────────────────────────────
 cloudinary.config(
-    cloud_name="dvidhwxb5",       # ← your cloud name
-    api_key="159374994381886",     # ← your API key
-    api_secret="8ZY8u1J_H4LXOJMuN9ltf5E5F24",  # ← your API secret
+    cloud_name=os.getenv("CLOUDINARY_CLOUD_NAME"),
+    api_key=os.getenv("CLOUDINARY_API_KEY"),
+    api_secret=os.getenv("CLOUDINARY_API_SECRET"),
     secure=True
 )
 
