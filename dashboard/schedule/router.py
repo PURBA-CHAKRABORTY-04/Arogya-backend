@@ -1,22 +1,26 @@
 # dashboard/schedule/router.py
-# FastAPI router for Schedule Events CRUD.
-#
-# All routes are prefixed with /schedule.
-# Endpoints:
-#   POST   /schedule/              — create a new schedule event
-#   GET    /schedule/{email}       — list all events for a patient
-#   GET    /schedule/{email}/today — list only today's events for a patient
-#   PUT    /schedule/{event_id}    — update a schedule event
-#   DELETE /schedule/{event_id}    — delete a schedule event
+"""
+Schedule Events CRUD — auth-gated, identity from JWT token.
+
+All endpoints require a valid Bearer JWT.
+The /me pattern replaces /{email} paths to prevent IDOR.
+
+Endpoints:
+  POST   /schedule/          — create a new schedule event
+  GET    /schedule/me        — list all events for the authenticated patient
+  GET    /schedule/me/today  — list only today's events
+  PUT    /schedule/{event_id} — update (with ownership check)
+  DELETE /schedule/{event_id} — delete (with ownership check)
+"""
 
 from datetime import date
-from urllib.parse import unquote
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 
 from auth.database import get_db
+from auth.dependencies import get_current_user, require_patient
 from auth.models import User
 from dashboard.schedule.models import ScheduleEvent
 from dashboard.schedule.schemas import (
@@ -25,26 +29,7 @@ from dashboard.schedule.schemas import (
     ScheduleEventUpdate,
 )
 
-
 router = APIRouter(prefix="/schedule", tags=["Schedule Events"])
-
-
-# ── RBAC helper ───────────────────────────────────────────────────────────────
-
-def _require_patient(email: str, db: Session) -> User:
-    """Fetch user by email; raise 404 if missing, 403 if not a patient."""
-    user = db.query(User).filter(User.email == email).first()
-    if not user:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="No registered user found with this email.",
-        )
-    if user.role != "patient":
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Only patient accounts can manage schedule events.",
-        )
-    return user
 
 
 # ── CREATE ────────────────────────────────────────────────────────────────────
@@ -58,20 +43,19 @@ def _require_patient(email: str, db: Session) -> User:
 def create_schedule_event(
     payload: ScheduleEventCreate,
     db: Session = Depends(get_db),
+    current_user: User = Depends(require_patient),
 ):
     """
-    Create a new schedule event for a patient.
+    Create a new schedule event for the authenticated patient.
+    The ``patient_email`` in the payload is overridden by the token's identity.
 
     - **Medication** category requires ``times_a_day``.
-      Optionally accepts ``till_date`` and ``relation_to_meal``.
-    - All other categories accept an optional ``details_notes`` field.
-
-    Returns **403** if the account is not a patient role.
-    Returns **404** if the email is not registered.
+    - Other categories accept an optional ``details_notes`` field.
     """
-    _require_patient(payload.patient_email, db)
+    data = payload.model_dump()
+    data["patient_email"] = current_user.email  # enforce server-side identity
 
-    event = ScheduleEvent(**payload.model_dump())
+    event = ScheduleEvent(**data)
     db.add(event)
     db.commit()
     db.refresh(event)
@@ -81,26 +65,21 @@ def create_schedule_event(
 # ── READ — all events ─────────────────────────────────────────────────────────
 
 @router.get(
-    "/{email}",
+    "/me",
     response_model=list[ScheduleEventResponse],
-    summary="Fetch all schedule events for a patient",
+    summary="Fetch all schedule events for the authenticated patient",
 )
-def get_all_schedule_events(email: str, db: Session = Depends(get_db)):
+def get_all_schedule_events(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_patient),
+):
     """
-    Returns every schedule event for the given patient email,
+    Returns every schedule event for the authenticated patient,
     ordered by event_time ascending.
-
-    **Note:** Percent-encode ``@`` as ``%40`` in the URL path.
-
-    Returns **403** if the account is not a patient role.
-    Returns **404** if the user does not exist.
     """
-    email = unquote(email)
-    _require_patient(email, db)
-
     events = (
         db.query(ScheduleEvent)
-        .filter(ScheduleEvent.patient_email == email)
+        .filter(ScheduleEvent.patient_email == current_user.email)
         .order_by(ScheduleEvent.event_time.asc())
         .all()
     )
@@ -110,42 +89,36 @@ def get_all_schedule_events(email: str, db: Session = Depends(get_db)):
 # ── READ — today's events only ────────────────────────────────────────────────
 
 @router.get(
-    "/{email}/today",
+    "/me/today",
     response_model=list[ScheduleEventResponse],
-    summary="Fetch today's schedule events for a patient",
+    summary="Fetch today's schedule events for the authenticated patient",
 )
-def get_today_schedule_events(email: str, db: Session = Depends(get_db)):
+def get_today_schedule_events(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_patient),
+):
     """
-    Returns schedule events for the current date only (using ``till_date``
-    for Medication events and ``created_at`` date for others).
+    Returns schedule events for the current date only.
 
     Logic:
     - Medication events are included if ``till_date`` is NULL or >= today.
     - All other events are included if ``created_at`` date == today.
-
-    **Note:** Percent-encode ``@`` as ``%40`` in the URL path.
     """
-    email = unquote(email)
-    _require_patient(email, db)
-
     today = date.today()
 
     events = (
         db.query(ScheduleEvent)
-        .filter(ScheduleEvent.patient_email == email)
+        .filter(ScheduleEvent.patient_email == current_user.email)
         .order_by(ScheduleEvent.event_time.asc())
         .all()
     )
 
-    # Filter in Python so we can apply category-specific logic cleanly.
     result = []
     for ev in events:
         if ev.category == "Medication":
-            # Show medication event if it has no end date or hasn't expired yet.
             if ev.till_date is None or ev.till_date >= today:
                 result.append(ev)
         else:
-            # Non-medication events: show if they were created today.
             if ev.created_at.date() == today:
                 result.append(ev)
 
@@ -163,13 +136,14 @@ def update_schedule_event(
     event_id: UUID,
     payload: ScheduleEventUpdate,
     db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ):
     """
     Partially update a schedule event by its UUID.
+    Only the owning patient may update their events.
 
-    Only the fields provided in the request body are updated.
-
-    Returns **404** if no event with that UUID exists.
+    - Returns **404** if the event does not exist.
+    - Returns **403** if the event does not belong to the caller.
     """
     event = db.query(ScheduleEvent).filter(ScheduleEvent.id == event_id).first()
     if not event:
@@ -177,9 +151,13 @@ def update_schedule_event(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Schedule event not found.",
         )
+    if event.patient_email != current_user.email:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You do not have permission to update this event.",
+        )
 
-    updates = payload.model_dump(exclude_unset=True)
-    for field, value in updates.items():
+    for field, value in payload.model_dump(exclude_unset=True).items():
         setattr(event, field, value)
 
     db.commit()
@@ -194,17 +172,28 @@ def update_schedule_event(
     status_code=status.HTTP_200_OK,
     summary="Delete a schedule event",
 )
-def delete_schedule_event(event_id: UUID, db: Session = Depends(get_db)):
+def delete_schedule_event(
+    event_id: UUID,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
     """
     Permanently remove a schedule event by its UUID.
+    Only the owning patient may delete their events.
 
-    Returns **404** if no event with that UUID exists.
+    - Returns **404** if the event does not exist.
+    - Returns **403** if the event does not belong to the caller.
     """
     event = db.query(ScheduleEvent).filter(ScheduleEvent.id == event_id).first()
     if not event:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Schedule event not found.",
+        )
+    if event.patient_email != current_user.email:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You do not have permission to delete this event.",
         )
 
     db.delete(event)

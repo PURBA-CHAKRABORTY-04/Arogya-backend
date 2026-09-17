@@ -2,13 +2,14 @@ import random
 import traceback
 from datetime import datetime, timedelta, timezone
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from .database import get_db
 from .email_utils import send_otp_email
 from .models import User
+from .rate_limit import forgot_password_limiter, verify_otp_limiter
 from .schemas import (
     ForgotPasswordRequest,
     ResetPasswordRequest,
@@ -138,12 +139,16 @@ def login(payload: UserLogin, db: Session = Depends(get_db)):
 # ── Forgot Password — Step 1: Send OTP ───────────────────────────────────────
 
 @router.post("/forgot-password", status_code=status.HTTP_200_OK)
-def forgot_password(payload: ForgotPasswordRequest, db: Session = Depends(get_db)):
+def forgot_password(request: Request, payload: ForgotPasswordRequest, db: Session = Depends(get_db)):
     """
     Generates a 6-digit OTP, stores it with a 10-minute expiry in the DB,
     then dispatches it to the user's inbox via the email microservice.
     Always returns 200 even if the email is not found (prevents user enumeration).
+    Rate-limited to 5 requests per 15 minutes per IP.
     """
+    # Rate-limit check: 5 requests per 15 minutes per IP
+    forgot_password_limiter.check(request)
+
     user = db.query(User).filter(User.email == payload.email).first()
 
     # Return a generic success even for unknown emails to prevent enumeration attacks.
@@ -179,11 +184,15 @@ def forgot_password(payload: ForgotPasswordRequest, db: Session = Depends(get_db
 # ── Forgot Password — Step 2: Verify OTP ─────────────────────────────────────
 
 @router.post("/verify-otp", status_code=status.HTTP_200_OK)
-def verify_otp(payload: VerifyOtpRequest, db: Session = Depends(get_db)):
+def verify_otp(request: Request, payload: VerifyOtpRequest, db: Session = Depends(get_db)):
     """
     Validates the submitted OTP against the stored code and expiry.
     Sets otp_verified=True on success so the reset-password endpoint can trust the session.
+    Rate-limited to 10 attempts per 15 minutes per IP (brute-force protection).
     """
+    # Rate-limit check: 10 attempts per 15 minutes per IP
+    verify_otp_limiter.check(request)
+
     user = db.query(User).filter(User.email == payload.email).first()
 
     if not user or not user.otp_code or not user.otp_expires_at:

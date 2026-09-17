@@ -9,6 +9,8 @@ from sqlalchemy.orm import Session
 from openai import OpenAI
 
 from auth.database import get_db
+from auth.dependencies import get_current_user, require_patient
+from auth.models import User
 from dashboard.patient.models import PatientInfo
 from dashboard.patient.timeline_models import TimelineEntry
 from .schemas import SymptomTriageRequest, TriageResponse, TriageSessionResponse, ChatMessage
@@ -40,20 +42,23 @@ IMPORTANT INSTRUCTIONS:
 
 
 @router.get("/sessions", response_model=List[TriageSessionResponse])
-def get_triage_sessions(patient_email: str, db: Session = Depends(get_db)):
-    """Fetch all chat sessions for the patient, auto-deleting those older than 14 days."""
+def get_triage_sessions(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Fetch all chat sessions for the authenticated patient, auto-deleting those older than 14 days."""
     fourteen_days_ago = datetime.now(timezone.utc) - timedelta(days=14)
     
     # Auto-delete sessions older than 14 days
     db.query(TriageSession).filter(
-        TriageSession.patient_email == patient_email,
+        TriageSession.patient_email == current_user.email,
         TriageSession.created_at < fourteen_days_ago
     ).delete(synchronize_session=False)
     db.commit()
 
     sessions = (
         db.query(TriageSession)
-        .filter(TriageSession.patient_email == patient_email)
+        .filter(TriageSession.patient_email == current_user.email)
         .order_by(TriageSession.updated_at.desc())
         .all()
     )
@@ -61,58 +66,74 @@ def get_triage_sessions(patient_email: str, db: Session = Depends(get_db)):
 
 
 @router.get("/sessions/{session_id}")
-def get_triage_session(session_id: str, db: Session = Depends(get_db)):
-    """Fetch the chat messages of a specific session."""
+def get_triage_session(
+    session_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Fetch the chat messages of a specific session. Verifies ownership."""
     session = db.query(TriageSession).filter(TriageSession.id == session_id).first()
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
+    if session.patient_email != current_user.email:
+        raise HTTPException(status_code=403, detail="You do not have access to this session.")
     return {"id": session.id, "title": session.title, "messages": session.messages}
 
 
 @router.delete("/sessions/{session_id}", status_code=status.HTTP_204_NO_CONTENT)
-def delete_triage_session(session_id: str, db: Session = Depends(get_db)):
-    """Manually delete a specific chat session."""
+def delete_triage_session(
+    session_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Manually delete a specific chat session. Verifies ownership."""
     session = db.query(TriageSession).filter(TriageSession.id == session_id).first()
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
+    if session.patient_email != current_user.email:
+        raise HTTPException(status_code=403, detail="You do not have access to this session.")
     db.delete(session)
     db.commit()
     return
 
 
 @router.post("/triage", response_model=TriageResponse)
-def triage_symptoms(payload: SymptomTriageRequest, db: Session = Depends(get_db)):
+def triage_symptoms(
+    payload: SymptomTriageRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
     api_key = os.getenv("OPENAI_API_KEY")
     if not api_key:
         raise HTTPException(status_code=500, detail="OPENAI_API_KEY is not configured.")
 
     client = OpenAI(api_key=api_key)
 
-    # Fetch patient context
-    patient = db.query(PatientInfo).filter(PatientInfo.email == payload.patient_email).first()
-    if not patient:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Patient profile not found. Cannot provide personalized triage."
-        )
+    # Derive patient email from the token — ignore payload.patient_email
+    patient_email = current_user.email
+    # Fetch patient context using the verified email
+    patient = db.query(PatientInfo).filter(PatientInfo.email == patient_email).first()
 
     context_parts = []
-    context_parts.append(f"Patient Name: {patient.name}")
-    context_parts.append(f"Gender: {patient.gender}")
-    if patient.smoking_status:
-        context_parts.append(f"Smoking Status: {patient.smoking_status}")
-    if patient.alcohol_consumption:
-        context_parts.append(f"Alcohol Consumption: {patient.alcohol_consumption}")
-    if patient.chronic_conditions:
-        context_parts.append(f"Chronic Conditions: {', '.join(patient.chronic_conditions)}")
-    if patient.known_allergies:
-        context_parts.append(f"Known Allergies: {', '.join(patient.known_allergies)}")
-    if hasattr(patient, "active_medications") and patient.active_medications:
-        context_parts.append(f"Active Medications: {', '.join(patient.active_medications)}")
+    if patient:
+        context_parts.append(f"Patient Name: {patient.name}")
+        context_parts.append(f"Gender: {patient.gender}")
+        if patient.smoking_status:
+            context_parts.append(f"Smoking Status: {patient.smoking_status}")
+        if patient.alcohol_consumption:
+            context_parts.append(f"Alcohol Consumption: {patient.alcohol_consumption}")
+        if patient.chronic_conditions:
+            context_parts.append(f"Chronic Conditions: {', '.join(patient.chronic_conditions)}")
+        if patient.known_allergies:
+            context_parts.append(f"Known Allergies: {', '.join(patient.known_allergies)}")
+        if hasattr(patient, "active_medications") and patient.active_medications:
+            context_parts.append(f"Active Medications: {', '.join(patient.active_medications)}")
+    else:
+        context_parts.append("(No patient profile found — responding without medical history context.)")
     
     timeline_entries = (
         db.query(TimelineEntry)
-        .filter(TimelineEntry.patient_email == payload.patient_email)
+        .filter(TimelineEntry.patient_email == patient_email)
         .order_by(TimelineEntry.created_at.desc())
         .limit(10)
         .all()
@@ -141,7 +162,7 @@ def triage_symptoms(payload: SymptomTriageRequest, db: Session = Depends(get_db)
         # Create a new session
         title = latest_user_message[:50] + ("..." if len(latest_user_message) > 50 else "")
         session = TriageSession(
-            patient_email=payload.patient_email,
+            patient_email=patient_email,  # always use verified token identity
             title=title,
             messages=[]
         )

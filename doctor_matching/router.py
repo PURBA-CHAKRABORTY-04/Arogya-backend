@@ -6,6 +6,8 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 
 from auth.database import get_db
+from auth.dependencies import get_current_user
+from auth.models import User
 from symptom_triage.models import TriageSession
 from .models import DoctorProfile, DoctorRankingInteraction
 from .schemas import (
@@ -224,13 +226,18 @@ def get_matched_doctors(
 
 
 @router.post("/match", response_model=DoctorMatchResponse)
-def match_doctors(payload: DoctorMatchRequest, db: Session = Depends(get_db)):
+def match_doctors(
+    payload: DoctorMatchRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
     """
     Ranks and matches available doctors against patient symptoms, location, and pre-scoring hard filters.
-    Executes batched Distance Matrix API calls and multi-factor weighted scoring.
+    patient_email from the request body is ignored; the authenticated user's email is used instead.
     """
     symptoms = payload.symptoms or ""
-    patient_email = payload.patient_email
+    # Always derive patient email from the verified token
+    patient_email = current_user.email
     location = payload.location or "All"
     max_price = payload.max_price
     recommended_specialty = payload.recommended_specialty
@@ -290,16 +297,19 @@ def match_doctors(payload: DoctorMatchRequest, db: Session = Depends(get_db)):
 
 
 @router.post("/interaction", response_model=InteractionLogResponse)
-def log_doctor_interaction(payload: InteractionLogRequest, db: Session = Depends(get_db)):
+def log_doctor_interaction(
+    payload: InteractionLogRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
     """
-    Logs user interactions (impressions, clicks, bookings) from doctor search results
-    into PostgreSQL table doctor_ranking_interactions.
-    Used for offline calibration of scoring engine weights against real user behavior.
+    Logs user interactions (impressions, clicks, bookings) from doctor search results.
+    patient_email in the payload is overridden by the authenticated user's identity.
     """
     try:
         interaction = DoctorRankingInteraction(
             session_id=payload.session_id,
-            patient_email=payload.patient_email,
+            patient_email=current_user.email,  # always use verified identity
             search_query=payload.search_query,
             doctor_id=payload.doctor_id,
             rank_position=payload.rank_position,

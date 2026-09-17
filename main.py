@@ -18,6 +18,7 @@ from dashboard.schedule.models import ScheduleEvent              # noqa: F401 â€
 from dashboard.schedule.router import router as schedule_router
 from doctor_matching.models import DoctorProfile              # noqa: F401 â€” ensures doctor_profiles table is created
 from doctor_matching.router import router as doctor_matching_router
+from dashboard.voice.router import router as voice_router
 
 
 # Create the FastAPI application object that Uvicorn runs.
@@ -64,6 +65,9 @@ app.include_router(schedule_router)
 
 # Register /doctor-matching routes for patient matching
 app.include_router(doctor_matching_router)
+
+# Register /voice routes for server-side Gemini audio transcription (Path B)
+app.include_router(voice_router)
 
 # Simple health/root endpoint to confirm the API is running.
 @app.get("/")

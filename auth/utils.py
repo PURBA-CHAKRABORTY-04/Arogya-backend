@@ -2,8 +2,14 @@ import os
 from datetime import datetime, timedelta, timezone
 
 from dotenv import load_dotenv
-from jose import jwt
+from fastapi import HTTPException, status
+from fastapi.security import OAuth2PasswordBearer
+from jose import JWTError, jwt
 from passlib.context import CryptContext
+
+# OAuth2 bearer token scheme — FastAPI uses this to extract the JWT from the
+# Authorization: Bearer <token> header in protected endpoints.
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/auth/login")
 
 
 # Load auth settings from .env, with development defaults as fallback.
@@ -35,3 +41,21 @@ def create_access_token(data: dict, expires_delta: timedelta | None = None) -> s
     )
     to_encode.update({"exp": expire})
     return jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
+
+
+def decode_access_token(token: str) -> dict:
+    """
+    Decode and verify a JWT access token.
+    Raises HTTP 401 if the token is invalid or expired.
+    Returns the decoded payload dict.
+    """
+    credentials_exception = HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Could not validate credentials.",
+        headers={"WWW-Authenticate": "Bearer"},
+    )
+    try:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        return payload
+    except JWTError:
+        raise credentials_exception

@@ -17,12 +17,14 @@ from typing import Optional
 import cloudinary
 import cloudinary.uploader
 import httpx
-from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
+from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
 from openai import OpenAI
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from auth.database import get_db
+from auth.dependencies import get_current_user
+from auth.models import User
 from dashboard.biometric.models import BiometricMetric
 
 # ── Configure Cloudinary ──────────────────────────────────────────────────────
@@ -194,8 +196,8 @@ def _upsert_metrics(
 )
 async def upload_report(
     file:          UploadFile    = File(...),
-    patient_email: Optional[str] = Form(None),
     db:            Session       = Depends(get_db),
+    current_user:  User          = Depends(get_current_user),
 ):
     """
     Full pipeline:
@@ -206,6 +208,8 @@ async def upload_report(
     5. Upsert metrics into the biometric_metrics table.
     6. Return the Cloudinary URL plus the count of metrics upserted.
     """
+    # Derive patient email from the authenticated token
+    patient_email = current_user.email
 
     # ── Validate MIME type ────────────────────────────────────────────
     if file.content_type not in ALLOWED_TYPES:

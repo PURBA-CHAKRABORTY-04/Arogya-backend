@@ -1,10 +1,17 @@
 # patient/router.py
-from urllib.parse import unquote
+"""
+Patient profile and health timeline CRUD.
+
+All endpoints require a valid Bearer JWT.
+Identity is derived from the token — clients never send their own email in the URL.
+Routes use /me to make it explicit that each patient only sees their own data.
+"""
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 
 from auth.database import get_db
+from auth.dependencies import get_current_user, require_patient
 from auth.models import User
 from dashboard.patient.models import PatientInfo
 from dashboard.patient.schemas import PatientInfoCreate, PatientInfoResponse, PatientInfoUpdate
@@ -12,32 +19,12 @@ from dashboard.patient.timeline_models import TimelineEntry
 from dashboard.patient.timeline_schemas import TimelineEntryCreate, TimelineEntryResponse
 
 
-# All routes in this file start with /patient and appear under the Patient Info tag in /docs.
 router = APIRouter(prefix="/patient", tags=["Patient Info"])
 
 
-# ── RBAC helper ───────────────────────────────────────────────────────────────
-
-def _require_patient_role(email: str, db: Session) -> User:
-    """
-    Fetch the user by email and raise 403 if their account role is not 'patient'.
-    Also raises 404 if the email is not registered at all.
-    """
-    user = db.query(User).filter(User.email == email).first()
-    if not user:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="No registered user found with this email.",
-        )
-    if user.role != "patient":
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Only patient accounts can have a patient profile.",
-        )
-    return user
-
-
-# ── Create ────────────────────────────────────────────────────────────────────
+# ══════════════════════════════════════════════════════════════════════════════
+# Patient Profile  (/patient/patient-info/me)
+# ══════════════════════════════════════════════════════════════════════════════
 
 @router.post(
     "/patient-info",
@@ -45,102 +32,85 @@ def _require_patient_role(email: str, db: Session) -> User:
     status_code=status.HTTP_201_CREATED,
     summary="Create a new patient profile",
 )
-def create_patient_info(payload: PatientInfoCreate, db: Session = Depends(get_db)):
+def create_patient_info(
+    payload: PatientInfoCreate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_patient),
+):
     """
-    Create a new PatientInfo record for an existing **patient** user.
+    Create a new PatientInfo record for the authenticated patient.
 
-    - Returns **404** if the email is not found in the users table.
     - Returns **403** if the account role is not ``patient``.
-    - Returns **409** if a profile already exists for this email.
+    - Returns **409** if a profile already exists.
     """
-    # Guard: email must exist and belong to a patient account.
-    _require_patient_role(payload.email, db)
+    # Always use the authenticated user's email — ignore any email in the payload
+    email = current_user.email
 
-    # Guard: each user may only have one patient profile.
-    existing = db.query(PatientInfo).filter(PatientInfo.email == payload.email).first()
+    existing = db.query(PatientInfo).filter(PatientInfo.email == email).first()
     if existing:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
-            detail="A patient profile already exists for this email.",
+            detail="A patient profile already exists for this account.",
         )
 
-    # Build and persist the new profile.
-    profile = PatientInfo(**payload.model_dump())
+    data = payload.model_dump()
+    data["email"] = email  # enforce server-side identity
+    profile = PatientInfo(**data)
     db.add(profile)
     db.commit()
     db.refresh(profile)
     return profile
 
 
-# ── Read ──────────────────────────────────────────────────────────────────────
-
 @router.get(
-    "/patient-info/{email}",
+    "/patient-info/me",
     response_model=PatientInfoResponse,
-    summary="Fetch a patient profile by email",
+    summary="Fetch the authenticated patient's profile",
 )
-def get_patient_info(email: str, db: Session = Depends(get_db)):
+def get_patient_info(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_patient),
+):
     """
-    Retrieve the PatientInfo record for the given email.
+    Retrieve the PatientInfo record for the currently logged-in patient.
 
-    **Note:** Email addresses must be percent-encoded in the URL path
-    (e.g. ``user%40example.com``). The server decodes them automatically.
-
-    - Returns **404** if no profile exists for this email.
-    - Returns **403** if the account role is not ``patient``.
+    - Returns **404** if no profile exists yet.
     """
-    email = unquote(email)
-
-    # Guard: only patient-role accounts have profiles.
-    _require_patient_role(email, db)
-
-    profile = db.query(PatientInfo).filter(PatientInfo.email == email).first()
+    profile = db.query(PatientInfo).filter(PatientInfo.email == current_user.email).first()
     if not profile:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail="No patient profile found for this email.",
+            detail="No patient profile found. Please complete the onboarding wizard.",
         )
     return profile
 
 
-# ── Update ────────────────────────────────────────────────────────────────────
-
 @router.put(
-    "/patient-info/{email}",
+    "/patient-info/me",
     response_model=PatientInfoResponse,
-    summary="Update editable fields of a patient profile",
+    summary="Update the authenticated patient's profile",
 )
 def update_patient_info(
-    email: str,
     payload: PatientInfoUpdate,
     db: Session = Depends(get_db),
+    current_user: User = Depends(require_patient),
 ):
     """
-    Partially update the PatientInfo record for the given email.
+    Partially update the authenticated patient's PatientInfo record.
 
     Immutable fields (``dob``, ``blood_group``, ``email``, ``name``, ``gender``)
-    cannot be changed via this endpoint — they are excluded from the request schema.
+    are excluded from the request schema and cannot be changed here.
 
-    **Note:** Email addresses must be percent-encoded in the URL path.
-
-    - Returns **404** if no profile exists for this email.
-    - Returns **403** if the account role is not ``patient``.
+    - Returns **404** if no profile exists.
     """
-    email = unquote(email)
-
-    # Guard: only patient-role accounts own profiles.
-    _require_patient_role(email, db)
-
-    profile = db.query(PatientInfo).filter(PatientInfo.email == email).first()
+    profile = db.query(PatientInfo).filter(PatientInfo.email == current_user.email).first()
     if not profile:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail="No patient profile found for this email.",
+            detail="No patient profile found.",
         )
 
-    # Apply only the fields that were explicitly sent (exclude_unset skips None defaults).
-    updates = payload.model_dump(exclude_unset=True)
-    for field, value in updates.items():
+    for field, value in payload.model_dump(exclude_unset=True).items():
         setattr(profile, field, value)
 
     db.commit()
@@ -148,62 +118,51 @@ def update_patient_info(
     return profile
 
 
-# ── Delete ────────────────────────────────────────────────────────────────────
-
 @router.delete(
-    "/patient-info/{email}",
+    "/patient-info/me",
     status_code=status.HTTP_200_OK,
-    summary="Delete a patient profile",
+    summary="Delete the authenticated patient's profile",
 )
-def delete_patient_info(email: str, db: Session = Depends(get_db)):
+def delete_patient_info(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_patient),
+):
     """
-    Permanently delete the PatientInfo record for the given email.
+    Permanently delete the authenticated patient's PatientInfo record.
 
-    **Note:** Email addresses must be percent-encoded in the URL path.
-
-    - Returns **404** if no profile exists for this email.
-    - Returns **403** if the account role is not ``patient``.
+    - Returns **404** if no profile exists.
     """
-    email = unquote(email)
-
-    # Guard: only patient-role accounts own profiles.
-    _require_patient_role(email, db)
-
-    profile = db.query(PatientInfo).filter(PatientInfo.email == email).first()
+    profile = db.query(PatientInfo).filter(PatientInfo.email == current_user.email).first()
     if not profile:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail="No patient profile found for this email.",
+            detail="No patient profile found.",
         )
 
     db.delete(profile)
     db.commit()
-    return {"message": f"Patient profile for {email} deleted successfully."}
+    return {"message": "Patient profile deleted successfully."}
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# Health Timeline Entries
+# Health Timeline  (/patient/timeline/me)
 # ══════════════════════════════════════════════════════════════════════════════
 
 @router.get(
-    "/timeline/{email}",
+    "/timeline/me",
     response_model=list[TimelineEntryResponse],
-    summary="Fetch all health timeline entries for a patient",
+    summary="Fetch all health timeline entries for the authenticated patient",
 )
-def get_timeline(email: str, db: Session = Depends(get_db)):
+def get_timeline(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_patient),
+):
     """
-    Returns all timeline entries for the given patient email,
-    ordered newest-first.
-
-    - Returns **403** if the account is not a patient role.
-    - Returns **404** if the user does not exist.
+    Returns all timeline entries for the authenticated patient, newest-first.
     """
-    email = unquote(email)
-    _require_patient_role(email, db)
-
     entries = (
         db.query(TimelineEntry)
-        .filter(TimelineEntry.patient_email == email)
+        .filter(TimelineEntry.patient_email == current_user.email)
         .order_by(TimelineEntry.created_at.desc())
         .all()
     )
@@ -219,17 +178,17 @@ def get_timeline(email: str, db: Session = Depends(get_db)):
 def create_timeline_entry(
     payload: TimelineEntryCreate,
     db: Session = Depends(get_db),
+    current_user: User = Depends(require_patient),
 ):
     """
     Creates a new timeline entry (symptom log, document upload record,
-    voice triage summary, etc.) for the given patient.
-
-    - Returns **403** if the account is not a patient role.
-    - Returns **404** if the user does not exist.
+    voice triage summary, etc.) for the authenticated patient.
+    The ``patient_email`` in the payload is overridden by the token's identity.
     """
-    _require_patient_role(payload.patient_email, db)
+    data = payload.model_dump()
+    data["patient_email"] = current_user.email  # enforce server-side identity
 
-    entry = TimelineEntry(**payload.model_dump())
+    entry = TimelineEntry(**data)
     db.add(entry)
     db.commit()
     db.refresh(entry)
@@ -241,17 +200,28 @@ def create_timeline_entry(
     status_code=status.HTTP_200_OK,
     summary="Delete a single health timeline entry",
 )
-def delete_timeline_entry(entry_id: str, db: Session = Depends(get_db)):
+def delete_timeline_entry(
+    entry_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
     """
     Permanently removes the timeline entry with the given UUID.
+    Only the owning patient may delete their own entries.
 
     - Returns **404** if the entry does not exist.
+    - Returns **403** if the entry does not belong to the caller.
     """
     entry = db.query(TimelineEntry).filter(TimelineEntry.id == entry_id).first()
     if not entry:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Timeline entry not found.",
+        )
+    if entry.patient_email != current_user.email:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You do not have permission to delete this entry.",
         )
     db.delete(entry)
     db.commit()
