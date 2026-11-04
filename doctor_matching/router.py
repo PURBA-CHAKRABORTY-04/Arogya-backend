@@ -20,7 +20,12 @@ from .schemas import (
     ScoreBreakdownSchema,
     InteractionLogRequest,
     InteractionLogResponse,
+    PredictiveMatchRequest,
+    PredictiveMatchResponse,
+    PredictiveMatchItem,
 )
+from .clinical_matcher import extract_features_for_candidate
+from .ml_decision_models import TwoStageConstrainedEnsemble
 from .config import DEFAULT_CONFIG, MatchingEngineConfig
 from .distance_service import distance_service
 from .scoring_engine import (
@@ -31,7 +36,18 @@ from .scoring_engine import (
 
 router = APIRouter(prefix="/doctor-matching", tags=["Doctor Matching"])
 
-# In-memory storage for search session location state
+# ── Issue #5: In-memory session location store ───────────────────────────────
+# WARNING: This plain dict is NOT shared across Uvicorn workers or server
+# restarts. If multiple workers are running (e.g. uvicorn --workers N or
+# Render auto-scale), sessions created in one worker won't be visible in another.
+#
+# MIGRATION PATH: Replace with Redis (or a fast DB table):
+#   import redis, os, json
+#   _redis = redis.from_url(os.getenv("REDIS_URL", "redis://localhost:6379"))
+#   def set_location(sid, data): _redis.setex(sid, 3600, json.dumps(data))
+#   def get_location(sid): raw = _redis.get(sid); return json.loads(raw) if raw else None
+#
+# Until Redis is available, set UVICORN_WORKERS=1 to guarantee correctness.
 SESSION_LOCATIONS: Dict[str, Dict[str, Any]] = {}
 
 
@@ -291,8 +307,16 @@ def match_doctors(
         limit=50,
     )
 
+    limit = payload.limit or 50
+    offset = payload.offset or 0
+    paginated_matches = matches[offset : offset + limit]
+
     return DoctorMatchResponse(
-        matches=matches, session_id=session_id, candidate_pool_count=len(matches)
+        matches=paginated_matches,
+        session_id=session_id,
+        candidate_pool_count=len(matches),
+        limit=limit,
+        offset=offset,
     )
 
 
@@ -332,3 +356,106 @@ def log_doctor_interaction(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to record interaction: {str(exc)}",
         )
+
+
+# ── Predictive Decision Systems Matcher (Medical Dataset & ML Model) ──────────
+
+_cached_dataset_records: Optional[List[Dict[str, Any]]] = None
+_ensemble_engine = TwoStageConstrainedEnsemble()
+
+
+def _get_dataset_records() -> List[Dict[str, Any]]:
+    """Loads and caches the 4,291 doctor records from the CSV dataset."""
+    global _cached_dataset_records
+    if _cached_dataset_records is None:
+        dataset_path = os.path.join(
+            os.path.dirname(os.path.dirname(__file__)),
+            "doctror datset",
+            "Dataset Doctors - Sheet1 (1).csv"
+        )
+        if os.path.exists(dataset_path):
+            import csv
+            with open(dataset_path, "r", encoding="utf-8", errors="replace") as f:
+                reader = csv.DictReader(f)
+                _cached_dataset_records = list(reader)
+        else:
+            _cached_dataset_records = []
+    return _cached_dataset_records
+
+
+@router.post("/predictive-match", response_model=PredictiveMatchResponse)
+def run_predictive_doctor_match(payload: PredictiveMatchRequest):
+    """
+    Predictive scoring model matching user prompt & prompter specialty
+    against candidate medical dataset records.
+
+    Features:
+      - Match doctor specialties and doctor names from query prompt
+      - Mathematical multi-model ensemble (Bayesian GLM + Random Forest + ANN)
+      - Hard clinical safety constraint: "Harm: No" invariant
+      - Transparent "Why?" explainability breakdown per candidate
+    """
+    records = _get_dataset_records()
+    if not records:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Doctor dataset is unavailable.",
+        )
+
+    results: List[PredictiveMatchItem] = []
+    prompter_spec = payload.prompter_specialty or ""
+    query_p = payload.query_prompt.strip()
+
+    # Pre-filter candidates: evaluate on records matching name tokens or specialty domain
+    candidates = []
+    clean_q = query_p.lower()
+    for r in records:
+        doc_name = (r.get("Name of Doctor") or "").lower()
+        doc_spec = (r.get("Specialization") or "").lower()
+        
+        # Candidate pre-selection for speed over 4,291 rows
+        if (clean_q in doc_name or any(tok in doc_name for tok in clean_q.split() if len(tok) > 3)
+            or (prompter_spec and prompter_spec.lower() in doc_spec)
+            or any(kw in doc_spec for kw in ["cardio", "neuro", "ortho", "gastro", "pulmon", "general", "pediatr"] if kw in clean_q)):
+            candidates.append(r)
+
+    # Fallback to sample if pre-filter returned too few
+    if len(candidates) < 15:
+        candidates = records[:200]
+
+    for row in candidates:
+        feat = extract_features_for_candidate(
+            query_prompt=query_p,
+            prompter_specialty=prompter_spec,
+            doctor_row=row,
+            urgency_level=payload.urgency_level or "routine"
+        )
+        res = _ensemble_engine.match_candidate(row, feat)
+        doc = res["doctor"]
+        exp = res["explanation"]
+
+        results.append(PredictiveMatchItem(
+            doctor_name=str(doc.get("Name of Doctor") or "Unknown Doctor"),
+            specialization=str(doc.get("Specialization") or "General Practice"),
+            hospital_location=str(doc.get("Location/Hospital") or "Kolkata, WB"),
+            educational_qualification=str(doc.get("Educational Qualification") or "MBBS"),
+            match_score=res["match_score"],
+            match_probability=res["match_probability"],
+            is_safe=res["is_safe"],
+            harm_prevention_status=exp["harm_prevention_status"],
+            why_reasons=exp["why_reasons"],
+            cautions=exp["cautions"],
+            model_breakdown=res["model_breakdown"]
+        ))
+
+    # Sort candidates by match_score descending
+    results.sort(key=lambda x: x.match_score, reverse=True)
+    top_results = results[:payload.limit or 10]
+
+    return PredictiveMatchResponse(
+        query_prompt=query_p,
+        prompter_specialty=prompter_spec,
+        matches=top_results,
+        total_candidates_searched=len(candidates),
+        harm_prevention_enforced=True
+    )

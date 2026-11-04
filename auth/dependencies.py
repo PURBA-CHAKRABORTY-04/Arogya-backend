@@ -88,3 +88,4 @@ def require_role(role: str):
 
 # Convenience shorthand — most patient endpoints use this instead of require_role("patient")
 require_patient = require_role("patient")
+require_doctor = require_role("doctor")

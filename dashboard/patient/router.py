@@ -7,11 +7,13 @@ Identity is derived from the token — clients never send their own email in the
 Routes use /me to make it explicit that each patient only sees their own data.
 """
 
+from typing import Optional
+from pydantic import BaseModel, Field
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 
 from auth.database import get_db
-from auth.dependencies import get_current_user, require_patient
+from auth.dependencies import get_current_user, require_patient, require_doctor
 from auth.models import User
 from dashboard.patient.models import PatientInfo
 from dashboard.patient.schemas import PatientInfoCreate, PatientInfoResponse, PatientInfoUpdate
@@ -20,6 +22,13 @@ from dashboard.patient.timeline_schemas import TimelineEntryCreate, TimelineEntr
 
 
 router = APIRouter(prefix="/patient", tags=["Patient Info"])
+
+
+class EmergencySosPayload(BaseModel):
+    latitude: Optional[float] = None
+    longitude: Optional[float] = None
+    address: Optional[str] = None
+    notes: Optional[str] = None
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -226,3 +235,89 @@ def delete_timeline_entry(
     db.delete(entry)
     db.commit()
     return {"message": "Timeline entry deleted."}
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Emergency SOS & Clinical Queue
+# ══════════════════════════════════════════════════════════════════════════════
+
+@router.post(
+    "/emergency-sos",
+    response_model=TimelineEntryResponse,
+    status_code=status.HTTP_201_CREATED,
+    summary="Record emergency SOS dispatch event",
+)
+def trigger_emergency_sos(
+    payload: EmergencySosPayload,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """
+    Issue #2: Real emergency SOS recording.
+    Attaches GPS coordinates, sets critical severity (10), and adds to health timeline.
+    """
+    loc_parts = []
+    if payload.latitude and payload.longitude:
+        loc_parts.append(f"GPS: {payload.latitude:.5f}, {payload.longitude:.5f}")
+    if payload.address:
+        loc_parts.append(f"Address: {payload.address}")
+
+    loc_str = f" [{' | '.join(loc_parts)}]" if loc_parts else ""
+    details = f"🚨 EMERGENCY SOS DISPATCH TRIGGERED by patient.{loc_str}"
+    if payload.notes:
+        details += f" Notes: {payload.notes}"
+
+    entry = TimelineEntry(
+        patient_email=current_user.email,
+        title="CRITICAL: Emergency SOS Dispatched",
+        details=details,
+        type="emergency",
+        severity=10,
+    )
+    db.add(entry)
+    db.commit()
+    db.refresh(entry)
+    return entry
+
+
+@router.get(
+    "/doctor-queue",
+    summary="Fetch active clinical patient queue for doctors",
+)
+def get_doctor_patient_queue(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_doctor),
+):
+    """
+    Issue #12: Dynamic doctor queue endpoint.
+    Retrieves real patient profiles and latest clinical status from Neon DB.
+    """
+    patients = db.query(PatientInfo).limit(20).all()
+    queue = []
+    for p in patients:
+        latest_entry = (
+            db.query(TimelineEntry)
+            .filter(TimelineEntry.patient_email == p.email)
+            .order_by(TimelineEntry.created_at.desc())
+            .first()
+        )
+        is_sos = latest_entry and (latest_entry.severity == 10 or latest_entry.type == "emergency")
+        queue.append({
+            "email": p.email,
+            "name": p.name,
+            "gender": p.gender,
+            "dob": p.dob.isoformat() if hasattr(p.dob, "isoformat") and p.dob else str(p.dob or ""),
+            "blood_group": p.blood_group,
+            "chronic_conditions": p.chronic_conditions or [],
+            "known_allergies": p.known_allergies or [],
+            "smoking_status": p.smoking_status,
+            "alcohol_consumption": p.alcohol_consumption,
+            "urgency": "CRITICAL" if is_sos else ("ELEVATED" if latest_entry and (latest_entry.severity or 0) >= 7 else "ROUTINE"),
+            "latest_timeline": {
+                "title": latest_entry.title,
+                "details": latest_entry.details,
+                "severity": latest_entry.severity,
+                "created_at": latest_entry.created_at.isoformat() if latest_entry.created_at else None,
+            } if latest_entry else None,
+        })
+    return queue

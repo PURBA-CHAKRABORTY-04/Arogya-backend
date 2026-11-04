@@ -145,48 +145,78 @@ def calculate_pool_fee_scores(
 
 
 def compute_symptom_specialty_scores(
-    symptoms: str,
+    symptoms: Optional[str],
     recommended_specialty: Optional[str],
     doctor_role: str,
     doctor_description: Optional[str]
 ) -> Tuple[float, float]:
     """
     Calculates S_spec (Specialty match score) and S_symp (Symptom overlap score).
+    Issue #14: Replaced raw substring matching with word-boundary regex and
+    clinically curated medical taxonomy to eliminate false positives.
     Returns (S_spec, S_symp).
     """
     role_lower = (doctor_role or "").lower()
     desc_lower = (doctor_description or "").lower()
     symptoms_lower = (symptoms or "").lower()
-    spec_lower = (recommended_specialty or "").lower()
+    spec_lower = (recommended_specialty or "").lower().strip()
 
-    # 1. Compute S_spec
+    # 1. Compute S_spec (Driven by LLM triage output)
     s_spec = 0.0
     if spec_lower:
-        if spec_lower in role_lower or role_lower in spec_lower:
+        # Match whole specialty root (e.g. cardio, neuro, ortho)
+        spec_stem = spec_lower.rstrip("ology").rstrip("ologist").rstrip("ic").rstrip("ist")
+        if re.search(r'\b' + re.escape(spec_lower) + r'\b', role_lower) or (len(spec_stem) >= 4 and spec_stem in role_lower):
             s_spec = 35.0
-        elif any(part in role_lower for part in spec_lower.split() if len(part) > 3):
+        elif any(len(p) > 3 and p in role_lower for p in spec_lower.split()):
             s_spec = 25.0
         elif spec_lower in desc_lower:
             s_spec = 15.0
 
-    # 2. Compute S_symp using symptom domain mapping
-    symptom_domain_map = [
-        (["chest", "heart", "breath", "palpitation", "bp", "cardiac"], ["cardio", "heart", "vascular"]),
-        (["headache", "migraine", "dizziness", "numbness", "seizure", "nerve"], ["neuro", "brain", "spine"]),
-        (["cough", "breath", "wheez", "asthma", "lung", "phlegm"], ["pulmon", "respiratory", "chest"]),
-        (["stomach", "nausea", "vomit", "diarrhea", "acidity", "gastric"], ["gastro", "digest", "liver"]),
-        (["joint", "back", "knee", "hip", "bone", "fracture", "arthritis"], ["ortho", "bone", "joint"]),
-        (["skin", "rash", "itch", "allergy", "acne", "eczema"], ["derm", "skin"]),
-        (["ear", "nose", "throat", "sinus", "tonsil", "hearing"], ["ent", "ear", "throat", "otolaryng"]),
-        (["urinary", "bladder", "prostate", "kidney", "renal"], ["urol", "nephro"]),
-        (["women", "pregnancy", "period", "pelvic", "maternity"], ["gynec", "gynaec", "obstetric"]),
-        (["child", "infant", "pediatric"], ["paediatr", "pediatr", "child"])
+    # 2. Compute S_symp using clinical domain mapping with whole-word boundaries
+    clinical_domain_map = [
+        # Cardiology
+        (["chest pain", "angina", "myocardial", "heart attack", "palpitation", "cardiac", "arrhythmia", "tachycardia", "hypertension", "bp"],
+         ["cardio", "heart", "vascular"]),
+        # Neurology
+        (["headache", "migraine", "dizziness", "vertigo", "syncope", "numbness", "seizure", "neuropathy", "tremor", "stroke", "nerve"],
+         ["neuro", "brain", "spine"]),
+        # Pulmonology
+        (["cough", "shortness of breath", "dyspnea", "wheezing", "asthma", "bronchitis", "pneumonia", "sputum", "phlegm", "lung"],
+         ["pulmon", "respiratory", "chest"]),
+        # Gastroenterology
+        (["stomach pain", "abdominal pain", "nausea", "vomiting", "diarrhea", "constipation", "acid reflux", "gerd", "gastric", "jaundice", "liver"],
+         ["gastro", "digest", "liver", "hepat"]),
+        # Orthopedics
+        (["joint pain", "back pain", "knee pain", "bone fracture", "arthritis", "ligament", "sprain", "orthopedic", "spine pain"],
+         ["ortho", "bone", "joint", "spine"]),
+        # Dermatology
+        (["skin rash", "pruritus", "itching", "dermatitis", "eczema", "psoriasis", "hives", "acne", "skin lesion"],
+         ["derm", "skin"]),
+        # ENT
+        (["ear pain", "tinnitus", "sinusitis", "sore throat", "tonsillitis", "pharyngitis", "hearing loss", "hoarseness"],
+         ["ent", "ear", "throat", "otolaryng"]),
+        # Urology / Nephrology
+        (["dysuria", "hematuria", "kidney stone", "urinary infection", "prostate", "flank pain", "renal"],
+         ["urol", "nephro"]),
+        # Gynecology / Obstetrics
+        (["pregnancy", "menstrual", "pelvic pain", "dysmenorrhea", "amenorrhea", "vaginal", "maternity"],
+         ["gynec", "gynaec", "obstetric"]),
+        # Pediatrics
+        (["infant", "toddler", "pediatric", "child", "colic", "newborn"],
+         ["paediatr", "pediatr", "child"])
     ]
 
     s_symp = 0.0
     if symptoms_lower:
-        for sym_tokens, doc_tokens in symptom_domain_map:
-            overlap = sum(1 for st in sym_tokens if st in symptoms_lower)
+        for sym_tokens, doc_tokens in clinical_domain_map:
+            # Word-boundary matching to prevent false positives like "chest of drawers"
+            overlap = 0
+            for st in sym_tokens:
+                pattern = r'\b' + re.escape(st) + r'\b' if " " in st or len(st) > 3 else r'\b' + re.escape(st) + r'\b'
+                if re.search(pattern, symptoms_lower):
+                    overlap += 1
+
             if overlap > 0:
                 has_role = any(dt in role_lower for dt in doc_tokens)
                 has_desc = any(dt in desc_lower for dt in doc_tokens)

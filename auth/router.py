@@ -1,3 +1,4 @@
+import logging
 import random
 import traceback
 from datetime import datetime, timedelta, timezone
@@ -24,6 +25,8 @@ from .utils import ACCESS_TOKEN_EXPIRE_MINUTES, create_access_token, hash_passwo
 
 # All routes in this file start with /auth and appear under the Auth tag in /docs.
 router = APIRouter(prefix="/auth", tags=["Auth"])
+
+logger = logging.getLogger(__name__)
 
 # How long a generated OTP stays valid.
 OTP_EXPIRY_MINUTES = 10
@@ -61,15 +64,15 @@ def signup(payload: UserSignup, db: Session = Depends(get_db)):
     )
 
     # Commit writes the new user to Neon; rollback keeps the session clean on error.
-    print("Creating new user:", user.email)
+    logger.info("Creating new user: %s", user.email)
     db.add(user)
     try:
-        print("Committing to database...")
+        logger.debug("Committing new user to database...")
         db.commit()
-        print("Commit successful.")
+        logger.debug("Commit successful for: %s", user.email)
     except IntegrityError as exc:
         db.rollback()
-        print("[IntegrityError]", traceback.format_exc())
+        logger.error("[IntegrityError] %s", traceback.format_exc())
         if getattr(exc.orig, "pgcode", None) != "23505":
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -81,8 +84,7 @@ def signup(payload: UserSignup, db: Session = Depends(get_db)):
         ) from None
     except Exception as exc:
         db.rollback()
-        print("[DB ERROR - full traceback]")
-        traceback.print_exc()
+        logger.error("[DB ERROR] %s", traceback.format_exc())
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Database error: {exc}",
@@ -177,7 +179,7 @@ def forgot_password(request: Request, payload: ForgotPasswordRequest, db: Sessio
             detail=str(exc),
         ) from exc
 
-    print(f"[forgot-password] OTP sent to {user.email}")
+    logger.info("[forgot-password] OTP sent to %s", user.email)
     return {"message": "If that email exists, an OTP has been sent."}
 
 
@@ -224,7 +226,7 @@ def verify_otp(request: Request, payload: VerifyOtpRequest, db: Session = Depend
     user.otp_verified = True
     db.commit()
 
-    print(f"[verify-otp] OTP verified for {user.email}")
+    logger.info("[verify-otp] OTP verified for %s", user.email)
     return {"message": "OTP verified successfully. You may now reset your password."}
 
 
@@ -272,5 +274,5 @@ def reset_password(payload: ResetPasswordRequest, db: Session = Depends(get_db))
     user.reset_token_expiry = None
 
     db.commit()
-    print(f"[reset-password] Password reset successful for {user.email}")
+    logger.info("[reset-password] Password reset successful for %s", user.email)
     return {"message": "Password reset successfully. You may now log in with your new password."}

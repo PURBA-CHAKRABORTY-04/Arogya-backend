@@ -23,26 +23,15 @@ if "channel_binding" in DATABASE_URL:
 engine = create_engine(DATABASE_URL)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
-# Locate dataset file dynamically
-possible_dirs = [
-    os.path.join(os.path.dirname(__file__), "doctror datset"),
-    os.path.join(os.path.dirname(__file__), "doctor datset"),
-    os.path.join(os.path.dirname(__file__), "Doc_database")
-]
-
-DATASET_PATH = None
-for d in possible_dirs:
-    candidate1 = os.path.join(d, "Dataset Doctors - Sheet1 (1).csv")
-    candidate2 = os.path.join(d, "Dataset Doctors - Sheet1.csv")
-    if os.path.exists(candidate1):
-        DATASET_PATH = candidate1
-        break
-    elif os.path.exists(candidate2):
-        DATASET_PATH = candidate2
-        break
-
-if not DATASET_PATH:
-    DATASET_PATH = os.path.join(os.path.dirname(__file__), "doctror datset", "Dataset Doctors - Sheet1 (1).csv")
+# Locate dataset file
+DATASET_PATH = os.path.join(os.path.dirname(__file__), "Doc_database", "Dataset Doctors - Sheet1.csv")
+if not os.path.exists(DATASET_PATH):
+    # Fallback search if path is modified
+    for fallback_dir in ["Doc_database", "data", "."]:
+        cand = os.path.join(os.path.dirname(__file__), fallback_dir, "Dataset Doctors - Sheet1.csv")
+        if os.path.exists(cand):
+            DATASET_PATH = cand
+            break
 
 
 KOLKATA_KEYWORDS = {

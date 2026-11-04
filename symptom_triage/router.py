@@ -1,6 +1,7 @@
 import os
 import json
 import uuid
+import logging
 from datetime import datetime, timedelta, timezone
 from typing import List, Optional
 
@@ -13,10 +14,31 @@ from auth.dependencies import get_current_user, require_patient
 from auth.models import User
 from dashboard.patient.models import PatientInfo
 from dashboard.patient.timeline_models import TimelineEntry
-from .schemas import SymptomTriageRequest, TriageResponse, TriageSessionResponse, ChatMessage
+from .schemas import (
+    SymptomTriageRequest, TriageResponse, TriageSessionResponse, ChatMessage,
+    RouteRequest, RouteResponse, SpecialtyItem,
+)
 from .models import TriageSession
+from .triage_engine import TriageEngine
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/symptom_triage", tags=["Symptom Triage"])
+
+# ── Issue #4: Module-level OpenAI singleton ──────────────────────────────────────
+# Creating a new OpenAI() client per-request is wasteful (connection pooling
+# overhead). We build it once at import time and reuse it for every request.
+_openai_client: OpenAI | None = None
+
+def get_openai_client() -> OpenAI:
+    """Return the module-level OpenAI singleton, creating it if needed."""
+    global _openai_client
+    if _openai_client is None:
+        api_key = os.getenv("OPENAI_API_KEY")
+        if not api_key:
+            raise HTTPException(status_code=500, detail="OPENAI_API_KEY is not configured.")
+        _openai_client = OpenAI(api_key=api_key)
+    return _openai_client
 
 
 def get_system_instruction(context_str: str) -> str:
@@ -43,26 +65,46 @@ IMPORTANT INSTRUCTIONS:
 
 @router.get("/sessions", response_model=List[TriageSessionResponse])
 def get_triage_sessions(
+    limit: int = 50,
+    offset: int = 0,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """Fetch all chat sessions for the authenticated patient, auto-deleting those older than 14 days."""
-    fourteen_days_ago = datetime.now(timezone.utc) - timedelta(days=14)
-    
-    # Auto-delete sessions older than 14 days
-    db.query(TriageSession).filter(
-        TriageSession.patient_email == current_user.email,
-        TriageSession.created_at < fourteen_days_ago
-    ).delete(synchronize_session=False)
-    db.commit()
-
+    """
+    Fetch chat sessions for the authenticated patient with pagination.
+    - Issue #20: Mutation (auto-delete) removed from GET handler to guarantee idempotency.
+    - Issue #15: Added limit/offset pagination.
+    """
     sessions = (
         db.query(TriageSession)
         .filter(TriageSession.patient_email == current_user.email)
         .order_by(TriageSession.updated_at.desc())
+        .offset(offset)
+        .limit(min(max(limit, 1), 100))
         .all()
     )
     return sessions
+
+
+@router.post("/sessions/cleanup", status_code=status.HTTP_200_OK)
+def cleanup_old_sessions(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """
+    Issue #20: Explicit maintenance endpoint for purging sessions older than 14 days.
+    """
+    fourteen_days_ago = datetime.now(timezone.utc) - timedelta(days=14)
+    deleted_count = (
+        db.query(TriageSession)
+        .filter(
+            TriageSession.patient_email == current_user.email,
+            TriageSession.created_at < fourteen_days_ago,
+        )
+        .delete(synchronize_session=False)
+    )
+    db.commit()
+    return {"message": f"Cleaned up {deleted_count} expired session(s)."}
 
 
 @router.get("/sessions/{session_id}")
@@ -103,11 +145,8 @@ def triage_symptoms(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    api_key = os.getenv("OPENAI_API_KEY")
-    if not api_key:
-        raise HTTPException(status_code=500, detail="OPENAI_API_KEY is not configured.")
-
-    client = OpenAI(api_key=api_key)
+    # Use module-level singleton — no per-request client creation
+    client = get_openai_client()
 
     # Derive patient email from the token — ignore payload.patient_email
     patient_email = current_user.email
@@ -155,7 +194,15 @@ def triage_symptoms(
     # Get the latest user message
     if not payload.messages:
         raise HTTPException(status_code=400, detail="Messages list cannot be empty.")
-        
+
+    # ── Issue #10: Input Sanitization ──────────────────────────────────────────
+    # Strip dangerous control characters and null bytes from incoming messages
+    for msg in payload.messages:
+        cleaned = "".join(ch for ch in msg.content if ch.isprintable() or ch in "\n\r\t").strip()
+        if not cleaned:
+            raise HTTPException(status_code=400, detail="Empty or non-printable message content is not permitted.")
+        msg.content = cleaned
+
     latest_user_message = payload.messages[-1].content
     
     if not session:
@@ -170,10 +217,34 @@ def triage_symptoms(
         db.commit()
         db.refresh(session)
         
-    # Build history for OpenAI
+    # ── Issue #7: Sliding-Window History Strategy ──────────────────────────────
+    # Sending full unbounded chat histories blows up token costs exponentially
+    # and exhausts max_tokens context limits.
+    # Best practice: Always preserve System Instructions + Initial Chief Complaint
+    # + Recent Window of last 6 turns (3 Q&A rounds).
     openai_messages = [{"role": "system", "content": system_prompt}]
     
-    for msg in payload.messages:
+    all_msgs = payload.messages
+    if len(all_msgs) <= 7:
+        window_msgs = all_msgs
+    else:
+        initial_msg = all_msgs[0]
+        recent_msgs = all_msgs[-6:]
+        omitted_count = len(all_msgs) - 7
+        
+        # Keep chief complaint
+        openai_messages.append({
+            "role": "assistant" if initial_msg.role in ("model", "assistant") else "user",
+            "content": f"[Patient Initial Chief Complaint]: {initial_msg.content}"
+        })
+        # Inject rolling transition indicator
+        openai_messages.append({
+            "role": "system",
+            "content": f"[Note: {omitted_count} earlier dialogue turns condensed to preserve LLM token context. Active clinical conversation continues below.]"
+        })
+        window_msgs = recent_msgs
+
+    for msg in window_msgs:
         role = "assistant" if msg.role in ("model", "assistant") else "user"
         openai_messages.append({"role": role, "content": msg.content})
 
@@ -212,7 +283,7 @@ def triage_symptoms(
         )
     except Exception as e:
         error_str = str(e)
-        print(f"ERROR in triage_symptoms: {error_str}")
+        logger.error("ERROR in triage_symptoms: %s", error_str, exc_info=True)
         if "429" in error_str or "quota" in error_str.lower():
             return TriageResponse(
                 message="Arogya AI is currently experiencing high traffic. Please try again in a few moments.",
@@ -224,3 +295,60 @@ def triage_symptoms(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to generate response: {error_str}"
         )
+
+
+# ---------------------------------------------------------------------------
+# POST /symptom_triage/route — 5-stage intelligence pipeline
+# ---------------------------------------------------------------------------
+
+@router.post("/route", response_model=RouteResponse)
+def route_specialty(
+    payload: RouteRequest,
+    current_user: User = Depends(get_current_user),
+):
+    """Run the full 5-stage specialty routing pipeline.
+
+    Accepts free-form patient complaint text plus optional structured fields.
+    Returns validated specialty routing JSON (schema v2.0) along with a
+    per-stage audit trail of any repairs made.
+    """
+    try:
+        engine = TriageEngine(openai_api_key=None, client=get_openai_client())
+        result = engine.run(payload.model_dump(exclude_none=True))
+    except TypeError:
+        # Older TriageEngine signature — fall back to passing key directly
+        api_key = os.getenv("OPENAI_API_KEY")
+        if not api_key:
+            raise HTTPException(status_code=500, detail="OPENAI_API_KEY is not configured.")
+        engine = TriageEngine(openai_api_key=api_key)
+        result = engine.run(payload.model_dump(exclude_none=True))
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Triage engine error: {exc}",
+        )
+
+    final = result.final
+
+    # Build stage → repairs map for the frontend audit panel
+    stage_repairs: dict[str, list[str]] = {}
+    for s in result.stages:
+        if s.issues:
+            stage_repairs[s.stage] = s.issues
+
+    return RouteResponse(
+        schema_version=final.get("schema_version", "2.0"),
+        emergency=final.get("emergency", False),
+        urgency=final.get("urgency", "routine"),
+        specialties=[
+            SpecialtyItem(
+                name=sp["name"],
+                priority=sp["priority"],
+                confidence=sp["confidence"],
+            )
+            for sp in final.get("specialties", [])
+        ],
+        missing_info=final.get("missing_info", []),
+        pipeline_success=result.success,
+        stage_repairs=stage_repairs,
+    )

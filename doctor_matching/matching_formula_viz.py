@@ -339,7 +339,7 @@ fig.text(
               edgecolor="#334155", alpha=0.9)
 )
 
-out_path = "doctor_matching_probabilistic_formula.png"
+out_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "doctor_matching_probabilistic_formula.png")
 plt.savefig(out_path, dpi=150, bbox_inches="tight",
             facecolor=fig.get_facecolor())
 print(f"\n[SAVED] → {out_path}")

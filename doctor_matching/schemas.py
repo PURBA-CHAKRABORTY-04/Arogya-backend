@@ -33,6 +33,10 @@ class DoctorMatchRequest(BaseModel):
     max_distance_km: Optional[float] = None         # Max radius limit in kilometers
     availability_only: Optional[bool] = False       # Filter only available doctors
 
+    # Pagination (Issue #15)
+    limit: Optional[int] = Field(50, ge=1, le=100)
+    offset: Optional[int] = Field(0, ge=0)
+
 
 class ScoreBreakdownSchema(BaseModel):
     raw_score: float
@@ -86,6 +90,8 @@ class DoctorMatchResponse(BaseModel):
     matches: List[DoctorMatchResponseItem]
     session_id: Optional[str] = None
     candidate_pool_count: int = 0
+    limit: Optional[int] = 50
+    offset: Optional[int] = 0
 
 
 class InteractionLogRequest(BaseModel):
@@ -103,3 +109,34 @@ class InteractionLogRequest(BaseModel):
 class InteractionLogResponse(BaseModel):
     status: str
     interaction_id: UUID
+
+
+# ── Predictive ML Decision Matcher Schemas ────────────────────────────────────
+
+class PredictiveMatchRequest(BaseModel):
+    query_prompt: str = Field(..., description="User prompt query (e.g. 'Dr. Amitava Das' or 'Cardiologist for chest pain')")
+    prompter_specialty: Optional[str] = Field(None, description="Inferred or requested clinical specialty")
+    urgency_level: Optional[str] = Field("routine", description="'routine' | 'high' | 'critical'")
+    limit: Optional[int] = Field(10, ge=1, le=50)
+
+
+class PredictiveMatchItem(BaseModel):
+    doctor_name: str
+    specialization: str
+    hospital_location: str
+    educational_qualification: str
+    match_score: int
+    match_probability: float
+    is_safe: bool
+    harm_prevention_status: str
+    why_reasons: List[str]
+    cautions: List[str]
+    model_breakdown: Dict[str, Any]
+
+
+class PredictiveMatchResponse(BaseModel):
+    query_prompt: str
+    prompter_specialty: Optional[str]
+    matches: List[PredictiveMatchItem]
+    total_candidates_searched: int
+    harm_prevention_enforced: bool = True

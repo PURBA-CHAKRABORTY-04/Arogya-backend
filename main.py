@@ -1,3 +1,5 @@
+import logging
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -20,6 +22,16 @@ from doctor_matching.models import DoctorProfile              # noqa: F401 — e
 from doctor_matching.router import router as doctor_matching_router
 from dashboard.voice.router import router as voice_router
 
+# ── Issue #11: Structured logging configuration ───────────────────────────────
+# Replace all bare print() with Python's logging module.
+# LOG_LEVEL can be overridden via environment variable (e.g. LOG_LEVEL=DEBUG).
+import os
+_log_level = os.getenv("LOG_LEVEL", "INFO").upper()
+logging.basicConfig(
+    level=getattr(logging, _log_level, logging.INFO),
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    datefmt="%Y-%m-%dT%H:%M:%S",
+)
 
 # Create the FastAPI application object that Uvicorn runs.
 app = FastAPI(title="CognoCare AI Auth API")

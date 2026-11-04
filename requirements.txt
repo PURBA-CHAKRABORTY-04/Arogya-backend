@@ -1,35 +1,35 @@
 # Web framework
-fastapi>=0.111.0
+fastapi==0.111.0
 
 # ASGI server to run FastAPI
-uvicorn[standard]>=0.29.0
+uvicorn[standard]==0.29.0
 
 # Database ORM + PostgreSQL driver
-sqlalchemy>=2.0.0
-psycopg2-binary>=2.9.9
+sqlalchemy==2.0.30
+psycopg2-binary==2.9.9
 
 # Load .env variables
-python-dotenv>=1.0.0
+python-dotenv==1.0.1
 
 # Password hashing
 # bcrypt 4.1+ dropped __about__ which breaks passlib — pin to last compatible version
-passlib[bcrypt]>=1.7.4
+passlib[bcrypt]==1.7.4
 bcrypt==4.0.1
 
 # JWT token creation and verification
-python-jose[cryptography]>=3.3.0
+python-jose[cryptography]==3.3.0
 
 # Email validation support in Pydantic (EmailStr)
-pydantic[email]>=2.7.0
+pydantic[email]==2.7.1
 
 # Async HTTP client — used by email_utils to call the Vercel email microservice
-httpx>=0.27.0
+httpx==0.27.0
 
 # OpenAI for Symptom Triage + Biometric Metric Extraction
-openai>=1.0.0
+openai==1.30.1
 
 # Cloudinary — file storage for patient reports
-cloudinary>=1.44.0
+cloudinary==1.44.0
 
 # Multipart form uploads (required by FastAPI File/Form endpoints)
-python-multipart>=0.0.9
+python-multipart==0.0.9

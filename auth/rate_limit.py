@@ -1,10 +1,31 @@
 """
 auth/rate_limit.py
 -------------------
-Simple in-memory IP-based rate limiter.
+IP-based sliding-window rate limiter.
 
-No external dependencies — uses a defaultdict of timestamp lists.
-Resets on server restart, which is acceptable for OTP / password-reset flows.
+CURRENT IMPLEMENTATION: in-memory defaultdict (single-process only).
+
+⚠️  PRODUCTION LIMITATION (Issue #3):
+    This store resets on every server restart and is NOT shared across
+    Uvicorn workers or multiple instances. With Render auto-scaling or
+    multiple workers (uvicorn --workers N), each process has its own
+    counter, making the effective limit N× higher than intended.
+
+    MIGRATION PATH: Replace the defaultdict store with Redis using
+    `slowapi` + `limits` with a Redis backend:
+
+        from slowapi import Limiter
+        from slowapi.util import get_remote_address
+        from limits.storage import RedisStorage
+
+        limiter = Limiter(
+            key_func=get_remote_address,
+            storage_uri=os.getenv("REDIS_URL", "redis://localhost:6379"),
+        )
+
+    Until Redis is available, this is acceptable for low-traffic deployments
+    with a single worker. Set UVICORN_WORKERS=1 in your deployment config
+    to at least guarantee correctness until the migration is done.
 
 Usage:
     from auth.rate_limit import RateLimiter

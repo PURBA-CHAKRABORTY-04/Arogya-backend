@@ -296,7 +296,7 @@ To regenerate the visualization plot:
 cd "d:\Congocare Ai\Arogya-backend"
 python -X utf8 doctor_matching/matching_formula_viz.py
 ```
-Output artifact: [`doctor_matching_probabilistic_formula.png`](file:///d:/Congocare%20Ai/Arogya-backend/doctor_matching_probabilistic_formula.png).
+Output artifact: [`doctor_matching_probabilistic_formula.png`](./doctor_matching_probabilistic_formula.png).
 
 ---
 
