@@ -69,3 +69,10 @@ desktop.ini
 # Logs
 *.log
 
+# Databases & local caches
+*.db
+*.sqlite
+*.sqlite3
+local_arogya.db
+
+

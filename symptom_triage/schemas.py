@@ -65,3 +65,47 @@ class RouteResponse(BaseModel):
     missing_info: List[str]
     pipeline_success: bool
     stage_repairs: Dict[str, List[str]]         # stage name → list of repair notes
+
+
+# ---------------------------------------------------------------------------
+# Unified 3-stage Chat Pipeline — POST /symptom_triage/chat
+# ---------------------------------------------------------------------------
+
+class MatchedDoctorItem(BaseModel):
+    name: str
+    role: Optional[str] = None
+    qualification: Optional[str] = None
+    location: Optional[str] = None
+    match_score: Optional[int] = 85
+    consultation_fee: Optional[float] = 500.0
+
+
+class ChatTriageRequest(BaseModel):
+    message: Optional[str] = None
+    text: Optional[str] = None
+    complaint: Optional[str] = None
+    story: Optional[str] = None
+    session_id: Optional[str] = None
+    messages: Optional[List[ChatMessage]] = None
+    age: Optional[Any] = None
+    gender: Optional[str] = None
+
+
+class ChatTriageResponse(BaseModel):
+    message: str
+    reply: str
+    keywords: List[str] = Field(default_factory=list)
+    negated_keywords: List[str] = Field(default_factory=list)
+    tuples: Dict[str, Any] = Field(default_factory=dict)
+    emergency: bool = False
+    is_emergency: bool = False
+    urgency: str = "routine"
+    red_flags: List[str] = Field(default_factory=list)
+    specialties: List[str] = Field(default_factory=list)
+    specialty_details: List[SpecialtyItem] = Field(default_factory=list)
+    doctors: List[MatchedDoctorItem] = Field(default_factory=list)
+    rules: List[str] = Field(default_factory=list)
+    chips: List[str] = Field(default_factory=list)
+    is_final: bool = True
+    session_id: Optional[str] = None
+

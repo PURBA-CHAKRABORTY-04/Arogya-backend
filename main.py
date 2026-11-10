@@ -52,7 +52,11 @@ app.add_middleware(
 )
 
 # Create database tables from SQLAlchemy models if they do not already exist.
-Base.metadata.create_all(bind=engine)
+try:
+    Base.metadata.create_all(bind=engine)
+except Exception as e:
+    logging.warning("Database table sync note: %s", e)
+
 
 # Register all /auth routes, such as /auth/signup and /auth/login.
 app.include_router(auth_router)

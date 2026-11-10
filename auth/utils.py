@@ -10,6 +10,8 @@ from passlib.context import CryptContext
 # OAuth2 bearer token scheme — FastAPI uses this to extract the JWT from the
 # Authorization: Bearer <token> header in protected endpoints.
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/auth/login")
+optional_oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/auth/login", auto_error=False)
+
 
 
 # Load auth settings from .env, with development defaults as fallback.

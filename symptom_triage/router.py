@@ -10,16 +10,21 @@ from sqlalchemy.orm import Session
 from openai import OpenAI
 
 from auth.database import get_db
-from auth.dependencies import get_current_user, require_patient
+from auth.dependencies import get_current_user, require_patient, get_optional_current_user
 from auth.models import User
 from dashboard.patient.models import PatientInfo
 from dashboard.patient.timeline_models import TimelineEntry
 from .schemas import (
     SymptomTriageRequest, TriageResponse, TriageSessionResponse, ChatMessage,
     RouteRequest, RouteResponse, SpecialtyItem,
+    ChatTriageRequest, ChatTriageResponse, MatchedDoctorItem,
 )
 from .models import TriageSession
 from .triage_engine import TriageEngine
+from .chat_pipeline import (
+    extract_clinical_tuple, triage_story, match_doctors_for_triage, resolve_case_id
+)
+
 
 logger = logging.getLogger(__name__)
 
@@ -352,3 +357,137 @@ def route_specialty(
         pipeline_success=result.success,
         stage_repairs=stage_repairs,
     )
+
+
+# ---------------------------------------------------------------------------
+# POST /symptom_triage/chat — Unified 3-stage triage & doctor matching chat endpoint
+# ---------------------------------------------------------------------------
+
+@router.post("/chat", response_model=ChatTriageResponse)
+def triage_chat(
+    payload: ChatTriageRequest,
+    db: Session = Depends(get_db),
+    current_user: Optional[User] = Depends(get_optional_current_user),
+):
+    """
+    Unified 3-stage triage chat endpoint:
+    1. Clinical Entity & Tuple Extraction (C, A, G, D, H, M, E) + Negation Detection
+    2. Triage & Urgency Evaluation with deterministic safety rules & age routing
+    3. Doctor Matching & Ranking against Kolkata doctor database
+    """
+    # 1. Resolve patient message / story
+    story_text = ""
+    if payload.message:
+        story_text = payload.message
+    elif payload.text:
+        story_text = payload.text
+    elif payload.complaint:
+        story_text = payload.complaint
+    elif payload.story:
+        story_text = payload.story
+    elif payload.messages:
+        for m in reversed(payload.messages):
+            if m.role in ("user", "patient"):
+                story_text = m.content
+                break
+        if not story_text and payload.messages:
+            story_text = payload.messages[-1].content
+
+    story_text = story_text.strip()
+    if not story_text:
+        raise HTTPException(status_code=400, detail="Patient message/story is required.")
+
+    # 2. Stage 1: Clinical Entity & Tuple Extraction
+    tuple_data = extract_clinical_tuple(story_text)
+    if payload.age is not None:
+        try:
+            tuple_data["age"] = float(payload.age)
+        except (ValueError, TypeError):
+            pass
+    if payload.gender:
+        tuple_data["gender"] = payload.gender
+
+    # 3. Stage 2: Triage Assessment & Red-Flag Escalation
+    case_id = resolve_case_id(story_text)
+    triage_data = triage_story(case_id, story_text, tuple_data)
+
+    # 4. Stage 3: Doctor Matching from Kolkata database
+    matched_doctors = match_doctors_for_triage(
+        triage_data["specialties"],
+        tuple_data["keywords"],
+        limit=5
+    )
+    doctor_items = [
+        MatchedDoctorItem(
+            name=doc["name"],
+            role=doc.get("role"),
+            qualification=doc.get("qualification"),
+            location=doc.get("location"),
+            match_score=doc.get("match_score", 85),
+            consultation_fee=doc.get("consultation_fee", 500.0),
+        )
+        for doc in matched_doctors
+    ]
+
+    # 5. Session tracking & persistence
+    session_id = payload.session_id or str(uuid.uuid4())
+    if current_user and db:
+        try:
+            session = db.query(TriageSession).filter(TriageSession.id == session_id).first()
+            if not session:
+                session = TriageSession(
+                    id=uuid.UUID(session_id) if len(session_id) == 36 else uuid.uuid4(),
+                    patient_email=current_user.email,
+                    title=story_text[:50] + ("..." if len(story_text) > 50 else ""),
+                    messages=[]
+                )
+                db.add(session)
+            session.messages = list(session.messages or []) + [
+                {"role": "user", "content": story_text},
+                {"role": "assistant", "content": triage_data["reply"]}
+            ]
+            session.updated_at = datetime.now(timezone.utc)
+            db.commit()
+            session_id = str(session.id)
+        except Exception as e:
+            logger.warning(f"Session DB persistence note: {e}")
+            db.rollback()
+
+    # Build specialty details
+    spec_items = [
+        SpecialtyItem(
+            name=spec,
+            priority=i + 1,
+            confidence=0.95 if i == 0 else 0.80
+        )
+        for i, spec in enumerate(triage_data["specialties"])
+    ]
+
+    return ChatTriageResponse(
+        message=triage_data["reply"],
+        reply=triage_data["reply"],
+        keywords=tuple_data["keywords"],
+        negated_keywords=tuple_data["negated_keywords"],
+        tuples={
+            "age": tuple_data.get("age"),
+            "gender": tuple_data.get("gender"),
+            "duration": tuple_data.get("duration"),
+            "chief_complaints": tuple_data.get("keywords"),
+            "negated_symptoms": tuple_data.get("negated_keywords"),
+            "history": tuple_data.get("history"),
+            "medications": tuple_data.get("medications"),
+            "red_flags": triage_data.get("red_flags", []),
+        },
+        emergency=triage_data["emergency"],
+        is_emergency=triage_data["emergency"],
+        urgency=triage_data["urgency"],
+        red_flags=triage_data.get("red_flags", []),
+        specialties=triage_data["specialties"],
+        specialty_details=spec_items,
+        doctors=doctor_items,
+        rules=triage_data.get("rules", []),
+        chips=triage_data.get("chips", []),
+        is_final=triage_data.get("is_final", True),
+        session_id=session_id,
+    )
+

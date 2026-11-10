@@ -16,9 +16,27 @@ from sqlalchemy.orm import Session
 
 from .database import get_db
 from .models import User
-from .utils import decode_access_token, oauth2_scheme
+from .utils import decode_access_token, oauth2_scheme, optional_oauth2_scheme
 
 logger = logging.getLogger(__name__)
+
+
+def get_optional_current_user(
+    token: str | None = Depends(optional_oauth2_scheme),
+    db: Session = Depends(get_db),
+) -> User | None:
+    """Optional JWT validation dependency. Returns User if valid token is provided, else None."""
+    if not token:
+        return None
+    try:
+        payload = decode_access_token(token)
+        email: str | None = payload.get("sub")
+        if not email:
+            return None
+        return db.query(User).filter(User.email == email).first()
+    except Exception:
+        return None
+
 
 
 def get_current_user(
