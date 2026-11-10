@@ -33,3 +33,8 @@ cloudinary==1.44.0
 
 # Multipart form uploads (required by FastAPI File/Form endpoints)
 python-multipart==0.0.9
+
+# ML & Decision Models for Doctor Matching
+numpy>=1.26.0
+scikit-learn>=1.4.0
+requests>=2.31.0
