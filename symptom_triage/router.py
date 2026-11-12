@@ -148,15 +148,15 @@ def delete_triage_session(
 def triage_symptoms(
     payload: SymptomTriageRequest,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: Optional[User] = Depends(get_optional_current_user),
 ):
     # Use module-level singleton — no per-request client creation
     client = get_openai_client()
 
-    # Derive patient email from the token — ignore payload.patient_email
-    patient_email = current_user.email
-    # Fetch patient context using the verified email
-    patient = db.query(PatientInfo).filter(PatientInfo.email == patient_email).first()
+    # Derive patient email from the token if authenticated, or payload, or guest
+    patient_email = current_user.email if current_user else (payload.patient_email or "guest@arogya.local")
+    # Fetch patient context using the email if available
+    patient = db.query(PatientInfo).filter(PatientInfo.email == patient_email).first() if (current_user or payload.patient_email) else None
 
     context_parts = []
     if patient:
