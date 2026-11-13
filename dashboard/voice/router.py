@@ -34,7 +34,7 @@ from typing import Optional
 import httpx
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
 
-from auth.dependencies import get_current_user
+from auth.dependencies import get_current_user, get_optional_current_user
 from auth.models import User
 
 # ── Constants ─────────────────────────────────────────────────────────────────
@@ -140,7 +140,7 @@ async def _call_gemini(payload: dict, api_key: str) -> dict:
 async def transcribe(
     audio_file: Optional[UploadFile] = File(default=None),
     text:       Optional[str]        = Form(default=None),
-    current_user: User               = Depends(get_current_user),
+    current_user: Optional[User]     = Depends(get_optional_current_user),
 ):
     """
     Accepts either:
