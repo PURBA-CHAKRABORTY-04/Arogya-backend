@@ -40,7 +40,7 @@ openai_client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 UNSTRUCTURED_API_KEY      = os.getenv("UNSTRUCTURED_API_KEY", "")
-UNSTRUCTURED_ENDPOINT     = "https://api.unstructuredapp.io/general/v0/general"
+UNSTRUCTURED_ENDPOINT     = "https://transform.unstructured.io/api/v2"
 
 ALLOWED_TYPES = {
     "image/jpeg", "image/jpg", "image/png",
