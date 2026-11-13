@@ -185,11 +185,14 @@ def compute_symptom_specialty_scores(
         (["cough", "shortness of breath", "dyspnea", "wheezing", "asthma", "bronchitis", "pneumonia", "sputum", "phlegm", "lung"],
          ["pulmon", "respiratory", "chest"]),
         # Gastroenterology
-        (["stomach pain", "abdominal pain", "nausea", "vomiting", "diarrhea", "constipation", "acid reflux", "gerd", "gastric", "jaundice", "liver"],
+        (["stomach pain", "stomach ache", "belly pain", "belly ache", "belly", "tummy", "tummy ache", "abdominal pain", "abdominal ache", "abdomen pain", "nausea", "vomiting", "diarrhea", "loose motion", "loose motions", "constipation", "acid reflux", "gerd", "gastric", "acidity", "indigestion", "bloating", "cramps", "heartburn", "jaundice", "liver", "gut pain", "digestive"],
          ["gastro", "digest", "liver", "hepat"]),
         # Orthopedics
-        (["joint pain", "back pain", "knee pain", "bone fracture", "arthritis", "ligament", "sprain", "orthopedic", "spine pain"],
+        (["joint pain", "back pain", "backache", "knee pain", "bone fracture", "bone pain", "neck pain", "shoulder pain", "arthritis", "ligament", "sprain", "orthopedic", "spine pain"],
          ["ortho", "bone", "joint", "spine"]),
+        # General / Internal Medicine
+        (["fever", "chills", "high temperature", "weakness", "body ache", "fatigue", "malaise", "weight loss", "exhaustion", "viral"],
+         ["general", "internal medicine", "physician", "family"]),
         # Dermatology
         (["skin rash", "pruritus", "itching", "dermatitis", "eczema", "psoriasis", "hives", "acne", "skin lesion"],
          ["derm", "skin"]),

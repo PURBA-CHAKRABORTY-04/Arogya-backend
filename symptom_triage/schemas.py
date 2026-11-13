@@ -20,6 +20,7 @@ class TriageResponse(BaseModel):
     chips: Optional[List[str]] = None
     isComplete: bool
     session_id: Optional[str] = None
+    recommended_specialty: Optional[str] = None
 
 
 class TriageSessionResponse(BaseModel):
