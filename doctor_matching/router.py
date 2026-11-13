@@ -358,8 +358,9 @@ def match_doctors(
             .first()
         )
         if latest_session:
-            if not recommended_specialty and latest_session.recommended_specialty:
-                recommended_specialty = latest_session.recommended_specialty
+            session_spec = getattr(latest_session, "recommended_specialty", None)
+            if not recommended_specialty and session_spec:
+                recommended_specialty = session_spec
 
             if not symptoms.strip() and latest_session.messages:
                 user_texts = [
