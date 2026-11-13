@@ -153,10 +153,15 @@ def triage_symptoms(
     # Use module-level singleton — no per-request client creation
     client = get_openai_client()
 
-    # Derive patient email from the token if authenticated, or payload, or guest
-    patient_email = current_user.email if current_user else (payload.patient_email or "guest@arogya.local")
-    # Fetch patient context using the email if available
-    patient = db.query(PatientInfo).filter(PatientInfo.email == patient_email).first() if (current_user or payload.patient_email) else None
+    # Determine if this is an authenticated request or a guest
+    is_guest = current_user is None and not payload.patient_email
+    patient_email = current_user.email if current_user else (payload.patient_email or None)
+
+    # Fetch patient context only for authenticated/identified users
+    patient = (
+        db.query(PatientInfo).filter(PatientInfo.email == patient_email).first()
+        if patient_email else None
+    )
 
     context_parts = []
     if patient:
@@ -181,7 +186,7 @@ def triage_symptoms(
         .order_by(TimelineEntry.created_at.desc())
         .limit(10)
         .all()
-    )
+    ) if patient_email else []
     if timeline_entries:
         context_parts.append("\nRecent Health Timeline Entries (Uploaded Symptoms/Documents):")
         for entry in reversed(timeline_entries):
@@ -191,10 +196,14 @@ def triage_symptoms(
     context_str = "\n".join(context_parts)
     system_prompt = get_system_instruction(context_str)
 
-    # Session Management
+    # Session Management — guests do NOT get a DB session (FK constraint: patient_email must exist in users table)
+    is_guest = patient_email is None
+    guest_session_id = str(uuid.uuid4()) if is_guest else None
     session = None
-    if payload.session_id:
-        session = db.query(TriageSession).filter(TriageSession.id == payload.session_id).first()
+
+    if not is_guest:
+        if payload.session_id:
+            session = db.query(TriageSession).filter(TriageSession.id == payload.session_id).first()
 
     # Get the latest user message
     if not payload.messages:
@@ -210,11 +219,11 @@ def triage_symptoms(
 
     latest_user_message = payload.messages[-1].content
     
-    if not session:
-        # Create a new session
+    if not is_guest and not session:
+        # Create a new DB session only for authenticated users
         title = latest_user_message[:50] + ("..." if len(latest_user_message) > 50 else "")
         session = TriageSession(
-            patient_email=patient_email,  # always use verified token identity
+            patient_email=patient_email,
             title=title,
             messages=[]
         )
@@ -265,26 +274,28 @@ def triage_symptoms(
         response_text = response.choices[0].message.content
         response_data = json.loads(response_text)
         
-        # Save to DB
-        updated_messages = []
-        for msg in payload.messages:
-            role = "assistant" if msg.role in ("model", "assistant") else "user"
-            updated_messages.append({"role": role, "content": msg.content})
-        
-        updated_messages.append({
-            "role": "assistant",
-            "content": response_data.get("message", "")
-        })
-        
-        session.messages = updated_messages
-        session.updated_at = datetime.now(timezone.utc)
-        db.commit()
+        # Save to DB only for authenticated users (guests have no DB session)
+        if session:
+            updated_messages = []
+            for msg in payload.messages:
+                role = "assistant" if msg.role in ("model", "assistant") else "user"
+                updated_messages.append({"role": role, "content": msg.content})
+            
+            updated_messages.append({
+                "role": "assistant",
+                "content": response_data.get("message", "")
+            })
+            
+            session.messages = updated_messages
+            session.updated_at = datetime.now(timezone.utc)
+            db.commit()
 
+        returned_session_id = str(session.id) if session else guest_session_id
         return TriageResponse(
             message=response_data.get("message", "I'm sorry, I couldn't process that."),
             chips=response_data.get("chips"),
             isComplete=response_data.get("isComplete", False),
-            session_id=str(session.id)
+            session_id=returned_session_id
         )
     except Exception as e:
         error_str = str(e)
