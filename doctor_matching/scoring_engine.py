@@ -285,8 +285,18 @@ def compute_doctor_score(
         + fee_weighted
     )
 
-    # 7. Clamp final score into integer percentage range (default 45 to 98)
-    final_score = int(round(min(max(raw_score, cfg.MIN_FINAL_SCORE), cfg.MAX_FINAL_SCORE)))
+    # 7. Normalize final score into realistic, differentiated percentage range:
+    # Relevant clinical matches: 70% to 98%
+    # Irrelevant non-matches: 45% to 58% (cannot outrank relevant doctors)
+    if s_combined > 0:
+        clinical_ratio = min(s_combined / 40.0, 1.0)
+        context_ratio = min((d_score + dist_weighted + e_bonus + fee_weighted) / 117.0, 1.0)
+        final_score = int(round(72.0 + (clinical_ratio * 18.0) + (context_ratio * 8.0)))
+    else:
+        context_ratio = min((d_score + dist_weighted + e_bonus + fee_weighted) / 117.0, 1.0)
+        final_score = int(round(45.0 + (context_ratio * 13.0)))
+
+    final_score = min(max(final_score, cfg.MIN_FINAL_SCORE), cfg.MAX_FINAL_SCORE)
 
     return ScoreBreakdown(
         raw_score=round(raw_score, 2),

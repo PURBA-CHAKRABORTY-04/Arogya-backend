@@ -1,12 +1,15 @@
 import os
 import json
 import uuid
+import logging
 from typing import List, Optional, Dict, Any
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 
+logger = logging.getLogger(__name__)
+
 from auth.database import get_db
-from auth.dependencies import get_current_user
+from auth.dependencies import get_current_user, get_optional_current_user
 from auth.models import User
 from symptom_triage.models import TriageSession
 from .models import DoctorProfile, DoctorRankingInteraction
@@ -83,6 +86,73 @@ def get_session_location(session_id: str):
     return {"session_id": session_id, "location": SESSION_LOCATIONS[session_id]}
 
 
+def infer_specialty_from_symptoms(symptoms: str) -> Optional[str]:
+    """
+    Semantically map ANY patient symptom description to the appropriate medical specialty.
+    Uses fast rule-based clinical keyword mapping with gpt-4o-mini fallback.
+    Prevents unrelated doctors (e.g. Ortho for belly ache / neurological symptoms)
+    from winning on qualification points alone.
+    """
+    if not symptoms or len(symptoms.strip()) < 3:
+        return None
+
+    s_low = symptoms.lower()
+    if any(w in s_low for w in ["belly", "stomach", "abdomen", "abdominal", "tummy", "digestion", "diarrhea", "vomit", "acidity", "constipation", "gas", "bloat", "cramp", "gerd", "acid reflux", "heartburn", "jaundice", "liver"]):
+        return "Gastroenterology"
+    if any(w in s_low for w in ["chest", "heart", "palpitation", "cardiac", "angina", "hypertension", "bp"]):
+        return "Cardiology"
+    if any(w in s_low for w in ["breath", "cough", "lung", "asthma", "wheez", "respiratory", "phlegm", "bronchitis"]):
+        return "Pulmonology"
+    if any(w in s_low for w in ["headache", "migraine", "dizzy", "dizziness", "vertigo", "seizure", "numb", "nerve", "brain", "stroke", "paralysis", "faint"]):
+        return "Neurology"
+    if any(w in s_low for w in ["bone", "joint", "fracture", "knee", "spine", "back pain", "backache", "neck pain", "sprain", "ortho", "arthritis"]):
+        return "Orthopedics"
+    if any(w in s_low for w in ["skin", "rash", "itch", "acne", "pimple", "eczema", "hives", "spots", "dermatitis"]):
+        return "Dermatology"
+    if any(w in s_low for w in ["ear", "throat", "tonsil", "sinus", "hearing", "nasal", "nose", "voice"]):
+        return "ENT"
+    if any(w in s_low for w in ["urine", "urination", "kidney", "prostate", "bladder", "dysuria", "hematuria"]):
+        return "Urology"
+    if any(w in s_low for w in ["eye", "vision", "blur", "redness in eye", "cataract"]):
+        return "Ophthalmology"
+    if any(w in s_low for w in ["pregnant", "pregnancy", "period", "menstrual", "vaginal", "ovary", "pcos"]):
+        return "Gynecology"
+    if any(w in s_low for w in ["child", "pediatric", "infant", "baby"]):
+        return "Pediatrics"
+    if any(w in s_low for w in ["fever", "chills", "fatigue", "body ache", "weakness", "infection"]):
+        return "General Medicine"
+
+    # Semantic LLM inference for complex, multi-symptom, or colloquial text
+    openai_key = os.getenv("OPENAI_API_KEY")
+    if openai_key:
+        try:
+            from openai import OpenAI
+            client = OpenAI(api_key=openai_key)
+            prompt = (
+                "Given a patient's symptom description, return ONLY the single most relevant medical specialty from: "
+                "[Cardiology, Pulmonology, Neurology, Gastroenterology, Nephrology, Orthopedics, "
+                "Dermatology, Ophthalmology, ENT, Urology, Gynecology, Pediatrics, Psychiatry, General Medicine]. "
+                "Return ONLY the specialty name verbatim, no punctuation, no other text."
+            )
+            resp = client.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=[
+                    {"role": "system", "content": prompt},
+                    {"role": "user", "content": f"Symptoms: {symptoms}"}
+                ],
+                max_tokens=15,
+                temperature=0.0,
+                timeout=2.5,
+            )
+            specialty = resp.choices[0].message.content.strip()
+            if specialty and len(specialty) < 30:
+                return specialty
+        except Exception as exc:
+            logger.warning("Semantic specialty inference failed: %s", exc)
+
+    return None
+
+
 def get_matched_doctors(
     db: Session,
     symptoms: str = "",
@@ -104,6 +174,13 @@ def get_matched_doctors(
     3. Multi-Factor Weighted Scoring Engine
     4. Post-Distance Radius Filter
     """
+    # Semantically infer the clinical specialty if user provided symptoms but no specialty
+    if symptoms and (not recommended_specialty or recommended_specialty.lower() in ("all", "none", "")):
+        inferred = infer_specialty_from_symptoms(symptoms)
+        if inferred:
+            recommended_specialty = inferred
+            logger.info("Semantically inferred specialty '%s' for symptoms: %s", inferred, symptoms[:50])
+
     cfg = config or DEFAULT_CONFIG
     query = db.query(DoctorProfile)
 
@@ -236,8 +313,9 @@ def get_matched_doctors(
             )
         )
 
-    # Rank doctors by match score (highest to lowest)
-    results.sort(key=lambda x: x.match_score, reverse=True)
+    # Rank doctors: clinically relevant doctors (s_combined > 0) strictly outrank non-matches,
+    # ordered by total multi-factor raw score
+    results.sort(key=lambda x: (x.score_breakdown.s_combined > 0, x.score_breakdown.raw_score), reverse=True)
     return results[:limit]
 
 
@@ -245,15 +323,14 @@ def get_matched_doctors(
 def match_doctors(
     payload: DoctorMatchRequest,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: Optional[User] = Depends(get_optional_current_user),
 ):
     """
     Ranks and matches available doctors against patient symptoms, location, and pre-scoring hard filters.
-    patient_email from the request body is ignored; the authenticated user's email is used instead.
+    Supports both authenticated patients and guest searches.
     """
     symptoms = payload.symptoms or ""
-    # Always derive patient email from the verified token
-    patient_email = current_user.email
+    patient_email = current_user.email if current_user else (payload.patient_email or None)
     location = payload.location or "All"
     max_price = payload.max_price
     recommended_specialty = payload.recommended_specialty

@@ -80,6 +80,55 @@ Return ONLY a valid JSON object (no markdown, no code fences), exactly like this
 router = APIRouter(prefix="/voice", tags=["Voice Transcription"])
 
 
+def _get_elevenlabs_key() -> Optional[str]:
+    for var in [
+        "ELEVENLABS_API_KEY",
+        "Eleven_Labs_API_KEY",
+        "ELEVEN_LABS_API_KEY",
+        "elevenlabs_api_key",
+        "eleven_labs_api_key",
+        "XI_API_KEY",
+        "ELEVENLABS_KEY",
+    ]:
+        val = os.getenv(var)
+        if val and val.strip():
+            return val.strip()
+    return None
+
+
+def _get_gemini_key() -> Optional[str]:
+    for var in [
+        "GEMINI_API_KEY",
+        "gemini_api_key",
+        "GEMINI_KEY",
+        "GOOGLE_API_KEY",
+        "google_api_key",
+        "GOOGLE_GEMINI_API_KEY",
+    ]:
+        val = os.getenv(var)
+        if val and val.strip():
+            return val.strip()
+    return None
+
+
+async def _transcribe_whisper(audio_bytes: bytes, filename: str) -> Optional[str]:
+    """Transcribe audio via OpenAI Whisper STT fallback."""
+    openai_key = os.getenv("OPENAI_API_KEY")
+    if not openai_key:
+        return None
+    try:
+        from openai import AsyncOpenAI
+        client = AsyncOpenAI(api_key=openai_key)
+        resp = await client.audio.transcriptions.create(
+            model="whisper-1",
+            file=(filename or "recording.webm", audio_bytes),
+        )
+        return resp.text.strip()
+    except Exception as exc:
+        logger.warning("OpenAI Whisper transcription failed: %s", exc)
+        return None
+
+
 async def _transcribe_elevenlabs(audio_bytes: bytes, filename: str, mime: str, api_key: str) -> str:
     """
     Transcribe audio via ElevenLabs Scribe STT API.
@@ -230,8 +279,8 @@ async def transcribe(
                 detail="Audio file is empty.",
             )
 
-        elevenlabs_key = os.getenv("ELEVENLABS_API_KEY")
-        gemini_key = os.getenv("GEMINI_API_KEY")
+        elevenlabs_key = _get_elevenlabs_key()
+        gemini_key = _get_gemini_key()
 
         # 1. Primary: ElevenLabs Scribe STT
         if elevenlabs_key:
@@ -248,47 +297,55 @@ async def transcribe(
                         "transcript": transcript,
                         "summary": summary,
                     }
-            except HTTPException:
-                raise
             except Exception as exc:
-                logger.warning("ElevenLabs transcription failed, checking Gemini fallback: %s", exc)
-                if not gemini_key:
-                    raise HTTPException(
-                        status_code=status.HTTP_502_BAD_GATEWAY,
-                        detail=f"ElevenLabs transcription failed: {exc}",
-                    )
+                logger.warning("ElevenLabs transcription failed, checking fallbacks: %s", exc)
 
-        # 2. Fallback: Gemini 2.5 Flash STT
-        if gemini_key:
-            b64_audio = base64.b64encode(audio_bytes).decode("utf-8")
-            gemini_payload = {
-                "contents": [
-                    {
-                        "parts": [
-                            {
-                                "inline_data": {
-                                    "mime_type": mime or "audio/webm",
-                                    "data": b64_audio,
-                                }
-                            },
-                            {"text": AUDIO_SYSTEM_PROMPT},
-                        ]
-                    }
-                ],
-                "generationConfig": {
-                    "temperature": 0.3,
-                    "responseMimeType": "application/json",
-                },
-            }
-            result = await _call_gemini(gemini_payload, gemini_key)
+        # 2. Secondary fallback: OpenAI Whisper STT
+        whisper_transcript = await _transcribe_whisper(
+            audio_bytes=audio_bytes,
+            filename=audio_file.filename or "recording.webm",
+        )
+        if whisper_transcript:
+            summary = await _generate_clinical_summary(whisper_transcript)
             return {
-                "transcript": result.get("transcript", "Transcript unavailable"),
-                "summary": result.get("summary", ""),
+                "transcript": whisper_transcript,
+                "summary": summary,
             }
+
+        # 3. Tertiary fallback: Gemini 2.5 Flash STT
+        if gemini_key:
+            try:
+                b64_audio = base64.b64encode(audio_bytes).decode("utf-8")
+                gemini_payload = {
+                    "contents": [
+                        {
+                            "parts": [
+                                {
+                                    "inline_data": {
+                                        "mime_type": mime or "audio/webm",
+                                        "data": b64_audio,
+                                    }
+                                },
+                                {"text": AUDIO_SYSTEM_PROMPT},
+                            ]
+                        }
+                    ],
+                    "generationConfig": {
+                        "temperature": 0.3,
+                        "responseMimeType": "application/json",
+                    },
+                }
+                result = await _call_gemini(gemini_payload, gemini_key)
+                return {
+                    "transcript": result.get("transcript", "Transcript unavailable"),
+                    "summary": result.get("summary", ""),
+                }
+            except Exception as exc:
+                logger.warning("Gemini transcription failed: %s", exc)
 
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Neither ELEVENLABS_API_KEY nor GEMINI_API_KEY is configured on the server.",
+            detail="Speech-to-text service is temporarily unavailable. Please verify API credentials on the server.",
         )
 
     # ── Text fallback path ────────────────────────────────────────────────────
