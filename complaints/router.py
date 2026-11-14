@@ -33,11 +33,15 @@ def create_complaint(
     Submit a new complaint or feedback ticket.
     The patient_email in the payload is overridden by the token's identity.
     """
+    desc = complaint_data.description
+    if complaint_data.doctor_reference:
+        desc = f"[Ref: {complaint_data.doctor_reference}] {desc}"
+
     new_complaint = Complaint(
         patient_email=current_user.email,  # enforce server-side identity
         category=complaint_data.category,
-        description=complaint_data.description,
-        status="Submitted",
+        description=desc,
+        status="Open",
     )
     db.add(new_complaint)
     db.commit()

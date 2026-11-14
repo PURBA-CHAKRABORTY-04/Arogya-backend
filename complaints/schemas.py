@@ -5,9 +5,10 @@ from datetime import datetime
 class ComplaintBase(BaseModel):
     category: str
     description: str
+    doctor_reference: Optional[str] = None
 
 class ComplaintCreate(ComplaintBase):
-    patient_email: EmailStr
+    patient_email: Optional[EmailStr] = None
 
 class ComplaintResponse(ComplaintBase):
     id: str
