@@ -36,16 +36,19 @@ logging.basicConfig(
 # Create the FastAPI application object that Uvicorn runs.
 app = FastAPI(title="CognoCare AI Auth API")
 
-# Allow the local Vite frontend to call this backend from the browser.
+# Allow the local Vite frontend and Cloudflare Pages to call this backend.
+extra_origins = [o.strip() for o in os.getenv("CORS_ORIGINS", "").split(",") if o.strip()]
 origins = [
     "http://localhost:5173",
     "http://127.0.0.1:5173",
+    "http://localhost:3000",
     "https://arogya.pages.dev",
-]
+] + extra_origins
 
 app.add_middleware(
     CORSMiddleware,
     allow_origins=origins,
+    allow_origin_regex=r"^https:\/\/.*\.pages\.dev$",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
